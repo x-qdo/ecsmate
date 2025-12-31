@@ -47,6 +47,7 @@ func init() {
 	rootCmd.AddCommand(rollbackCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(validateCmd)
+	rootCmd.AddCommand(templateCmd)
 }
 
 func Execute() error {

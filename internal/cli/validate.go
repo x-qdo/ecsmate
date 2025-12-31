@@ -69,7 +69,13 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 	// Step 3: Parse manifest
 	fmt.Print("  Parsing manifest... ")
-	manifest, err := config.ParseManifest(value)
+	manifestValue, err := loader.GetManifest(value)
+	if err != nil {
+		fmt.Printf("%s\n", red("FAILED"))
+		fmt.Printf("\n  Error: %v\n\n", err)
+		os.Exit(ExitCodeError)
+	}
+	manifest, err := config.ParseManifest(manifestValue)
 	if err != nil {
 		fmt.Printf("%s\n", red("FAILED"))
 		fmt.Printf("\n  Error: %v\n\n", err)

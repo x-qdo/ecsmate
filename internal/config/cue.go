@@ -62,6 +62,19 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 		}
 	}
 
+	// Add values directory files (shared defaults and SSM config)
+	valuesPath := filepath.Join(manifestPath, "values")
+	if stat, err := os.Stat(valuesPath); err == nil && stat.IsDir() {
+		valuesEntries, err := os.ReadDir(valuesPath)
+		if err == nil {
+			for _, entry := range valuesEntries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".cue") {
+					files = append(files, filepath.Join("values", entry.Name()))
+				}
+			}
+		}
+	}
+
 	// Load value files
 	for _, vf := range valueFiles {
 		absPath, err := filepath.Abs(vf)

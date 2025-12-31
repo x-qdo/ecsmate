@@ -107,7 +107,13 @@ func loadManifest(ctx context.Context, opts *GlobalOptions, ssmResolver config.S
 		return nil, err
 	}
 
-	manifest, err := config.ParseManifest(evaluated)
+	// Extract manifest field (supports both root-level and nested manifest)
+	manifestValue, err := loader.GetManifest(evaluated)
+	if err != nil {
+		return nil, err
+	}
+
+	manifest, err := config.ParseManifest(manifestValue)
 	if err != nil {
 		return nil, err
 	}
