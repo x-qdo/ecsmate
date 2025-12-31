@@ -105,8 +105,9 @@ func runApply(cmd *cobra.Command, args []string) error {
 	}
 
 	renderer := diff.NewRenderer(os.Stdout, opts.NoColor)
+	renderer.RenderHeader(manifest.Name)
 	renderer.RenderDiff(plan.Entries)
-	renderer.RenderSummary(plan.Summary)
+	renderer.RenderSummary(plan.Summary, manifest.Name)
 
 	if !applyAutoApprove {
 		if !confirmApply() {

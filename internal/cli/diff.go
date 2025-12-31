@@ -77,6 +77,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		ECSClient:          clients.ECS,
 		SchedulerClient:    clients.Scheduler,
 		AutoScalingClient:  clients.AutoScaling,
+		ELBV2Client:        clients.ELBV2,
 		SchedulerGroupName: manifest.Name,
 	})
 	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
@@ -89,8 +90,9 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	plan := planner.GeneratePlan(state)
 
 	renderer := diff.NewRenderer(os.Stdout, opts.NoColor)
+	renderer.RenderHeader(manifest.Name)
 	renderer.RenderDiff(plan.Entries)
-	renderer.RenderSummary(plan.Summary)
+	renderer.RenderSummary(plan.Summary, manifest.Name)
 
 	if plan.HasChanges() {
 		os.Exit(ExitCodeDiffDetected)
@@ -133,6 +135,7 @@ type AWSClients struct {
 	Scheduler   *aws.SchedulerClient
 	AutoScaling *aws.AutoScalingClient
 	IAM         *aws.IAMClient
+	ELBV2       *aws.ELBV2Client
 }
 
 func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.Manifest) (*AWSClients, error) {
@@ -176,6 +179,14 @@ func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.M
 				log.Warn("failed to initialize auto-scaling client", "error", err)
 			}
 			break
+		}
+	}
+
+	// Initialize ELBV2 client if there's an ingress configuration
+	if manifest.Ingress != nil {
+		clients.ELBV2, err = aws.NewELBV2Client(ctx, opts.Region)
+		if err != nil {
+			log.Warn("failed to initialize ELBV2 client", "error", err)
 		}
 	}
 
