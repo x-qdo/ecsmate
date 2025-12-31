@@ -131,11 +131,12 @@ func loadManifest(ctx context.Context, opts *GlobalOptions, ssmResolver config.S
 }
 
 type AWSClients struct {
-	ECS         *aws.ECSClient
-	Scheduler   *aws.SchedulerClient
+	ECS        *aws.ECSClient
+	Scheduler  *aws.SchedulerClient
 	AutoScaling *aws.AutoScalingClient
 	IAM         *aws.IAMClient
 	ELBV2       *aws.ELBV2Client
+	CloudWatch  *aws.CloudWatchLogsClient
 }
 
 func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.Manifest) (*AWSClients, error) {
@@ -188,6 +189,12 @@ func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.M
 		if err != nil {
 			log.Warn("failed to initialize ELBV2 client", "error", err)
 		}
+	}
+
+	// Initialize CloudWatch client for log fetching on failures
+	clients.CloudWatch, err = aws.NewCloudWatchLogsClient(ctx, opts.Region)
+	if err != nil {
+		log.Warn("failed to initialize CloudWatch client", "error", err)
 	}
 
 	return clients, nil

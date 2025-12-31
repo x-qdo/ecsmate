@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type Executor struct {
 	noWait              bool
 	timeout             time.Duration
 	maxParallel         int
+	logLines            int
 }
 
 type ExecutorConfig struct {
@@ -43,6 +45,7 @@ type ExecutorConfig struct {
 	NoWait           bool
 	Timeout          time.Duration
 	MaxParallel      int
+	LogLines         int // -1=all, 0=none, N=limit
 }
 
 func NewExecutor(cfg ExecutorConfig) *Executor {
@@ -68,6 +71,7 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 		noWait:           cfg.NoWait,
 		timeout:          timeout,
 		maxParallel:      maxParallel,
+		logLines:         cfg.LogLines,
 	}
 
 	if cfg.CloudWatchClient != nil {
@@ -101,13 +105,15 @@ func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster str
 		return fmt.Errorf("failed to register task definitions: %w", err)
 	}
 
-	if err := e.deployServices(ctx, plan); err != nil {
-		return fmt.Errorf("failed to deploy services: %w", err)
-	}
+	e.refreshTaskDefinitionRefs(plan)
 
-	// Apply listener rules (after services)
+	// Apply listener rules before services so target groups are attached to the load balancer.
 	if err := e.applyListenerRules(ctx, plan, targetGroupArns); err != nil {
 		return fmt.Errorf("failed to apply listener rules: %w", err)
+	}
+
+	if err := e.deployServices(ctx, plan); err != nil {
+		return fmt.Errorf("failed to deploy services: %w", err)
 	}
 
 	if err := e.applyScheduledTasks(ctx, plan); err != nil {
@@ -121,6 +127,54 @@ func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster str
 	}
 
 	return nil
+}
+
+func (e *Executor) refreshTaskDefinitionRefs(plan *ExecutionPlan) {
+	if plan == nil || len(plan.TaskDefs) == 0 {
+		return
+	}
+
+	taskDefArns := make(map[string]string, len(plan.TaskDefs))
+	for _, td := range plan.TaskDefs {
+		if td == nil || td.ResolvedArn == "" {
+			continue
+		}
+		taskDefArns[td.Name] = td.ResolvedArn
+	}
+
+	if len(taskDefArns) == 0 {
+		return
+	}
+
+	if plan.Graph != nil {
+		for _, node := range plan.Graph.nodes {
+			if node == nil || node.Resource == nil || node.Resource.Desired == nil {
+				continue
+			}
+			taskDefName := node.Resource.Desired.TaskDefinition
+			if taskDefName == "" {
+				continue
+			}
+			if arn, ok := taskDefArns[taskDefName]; ok && arn != "" {
+				log.Debug("refreshing service task definition", "service", node.Name, "taskDef", taskDefName, "arn", arn)
+				node.Resource.TaskDefinitionArn = arn
+			}
+		}
+	}
+
+	for _, task := range plan.ScheduledTasks {
+		if task == nil || task.Desired == nil {
+			continue
+		}
+		taskDefName := task.Desired.TaskDefinition
+		if taskDefName == "" {
+			continue
+		}
+		if arn, ok := taskDefArns[taskDefName]; ok && arn != "" {
+			log.Debug("refreshing scheduled task definition", "task", task.Name, "taskDef", taskDefName, "arn", arn)
+			task.TaskDefinitionArn = arn
+		}
+	}
 }
 
 func (e *Executor) applyLogGroups(ctx context.Context, plan *ExecutionPlan) error {
@@ -387,6 +441,11 @@ func (e *Executor) waitForService(ctx context.Context, svc *resources.ServiceRes
 	if svc.Desired != nil && svc.Desired.Name != "" {
 		serviceName = svc.Desired.Name
 	}
+	expectedTaskDef := svc.TaskDefinitionArn
+
+	// Track events after deployment started
+	deploymentStartTime := time.Now()
+	seenEventIDs := make(map[string]bool)
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -402,28 +461,190 @@ func (e *Executor) waitForService(ctx context.Context, svc *resources.ServiceRes
 				continue
 			}
 
-			// Display live progress
-			e.tracker.PrintDeploymentProgress(DeploymentProgress{
-				ServiceName:  serviceName,
-				DesiredCount: status.DesiredCount,
-				RunningCount: status.RunningCount,
-				PendingCount: status.PendingCount,
-				RolloutState: status.RolloutState,
-				Healthy:      status.RunningCount,
+			// Debug logging for deployment tracking
+			log.Debug("deployment status",
+				"service", serviceName,
+				"desired", status.DesiredCount,
+				"running", status.RunningCount,
+				"pending", status.PendingCount,
+				"rolloutState", status.RolloutState,
+				"taskDef", status.TaskDefinition,
+				"deploymentCount", status.DeploymentCount,
+				"isRollingBack", status.IsRollingBack,
+			)
+			if status.PrimaryDeployment != nil {
+				log.Debug("primary deployment (NEW)",
+					"id", status.PrimaryDeployment.ID,
+					"taskDef", status.PrimaryDeployment.TaskDefinition,
+					"running", status.PrimaryDeployment.RunningCount,
+					"pending", status.PrimaryDeployment.PendingCount,
+					"failed", status.PrimaryDeployment.FailedTasks,
+					"rolloutState", status.PrimaryDeployment.RolloutState,
+				)
+			}
+			if status.ActiveDeployment != nil {
+				log.Debug("active deployment (OLD)",
+					"id", status.ActiveDeployment.ID,
+					"taskDef", status.ActiveDeployment.TaskDefinition,
+					"running", status.ActiveDeployment.RunningCount,
+					"pending", status.ActiveDeployment.PendingCount,
+				)
+			}
+
+			// Collect recent events (up to 5, newest first) that occurred after deployment started
+			var recentEvents []EventInfo
+			for _, event := range status.Events {
+				if event.CreatedAt.After(deploymentStartTime) && !seenEventIDs[event.ID] {
+					seenEventIDs[event.ID] = true
+					recentEvents = append(recentEvents, EventInfo{
+						Timestamp: event.CreatedAt,
+						Message:   event.Message,
+					})
+					log.Debug("new event", "service", serviceName, "time", event.CreatedAt.Format("15:04:05"), "msg", event.Message)
+				}
+			}
+			log.Debug("events collected", "service", serviceName, "newEvents", len(recentEvents), "totalSeen", len(seenEventIDs))
+
+			// Build deployment progress info
+			var newDep, oldDep *DeploymentProgressInfo
+			if status.PrimaryDeployment != nil {
+				newDep = &DeploymentProgressInfo{
+					ID:             status.PrimaryDeployment.ID,
+					TaskDefinition: status.PrimaryDeployment.TaskDefinition,
+					RunningCount:   status.PrimaryDeployment.RunningCount,
+					PendingCount:   status.PrimaryDeployment.PendingCount,
+					FailedTasks:    status.PrimaryDeployment.FailedTasks,
+				}
+			}
+			if status.ActiveDeployment != nil {
+				oldDep = &DeploymentProgressInfo{
+					ID:             status.ActiveDeployment.ID,
+					TaskDefinition: status.ActiveDeployment.TaskDefinition,
+					RunningCount:   status.ActiveDeployment.RunningCount,
+					PendingCount:   status.ActiveDeployment.PendingCount,
+					FailedTasks:    status.ActiveDeployment.FailedTasks,
+				}
+			}
+
+			// Fetch task details
+			var taskDisplayInfos []TaskDisplayInfo
+			taskArns, err := e.ecsClient.ListServiceTasks(ctx, serviceName, "")
+			if err == nil && len(taskArns) > 0 {
+				tasks, err := e.ecsClient.DescribeTasks(ctx, taskArns)
+				if err == nil {
+					for _, t := range tasks {
+						taskDisplayInfos = append(taskDisplayInfos, TaskDisplayInfo{
+							TaskID:         t.TaskID,
+							LastStatus:     t.LastStatus,
+							DesiredStatus:  t.DesiredStatus,
+							StartedAt:      t.StartedAt,
+							TaskDefinition: t.TaskDefinitionArn,
+						})
+					}
+				}
+			}
+
+			// Update progress display
+			e.tracker.UpdateServiceProgress(ServiceProgressUpdate{
+				ServiceName:    serviceName,
+				DesiredCount:   status.DesiredCount,
+				RunningCount:   status.RunningCount,
+				PendingCount:   status.PendingCount,
+				RolloutState:   status.RolloutState,
+				TaskDefinition: status.TaskDefinition,
+				RolloutReason:  status.RolloutStateReason,
+				Events:         recentEvents,
+				Tasks:          taskDisplayInfos,
+				NewDeployment:  newDep,
+				OldDeployment:  oldDep,
+				IsRollingBack:  status.IsRollingBack,
 			})
 
 			switch status.RolloutState {
 			case "COMPLETED":
+				if rollbackDetected(expectedTaskDef, status) {
+					e.printFailureLogs(ctx, serviceName, status.Events, svc)
+					return fmt.Errorf("deployment rolled back to %s", status.TaskDefinition)
+				}
 				return nil
 			case "FAILED":
+				e.printFailureLogs(ctx, serviceName, status.Events, svc)
 				return fmt.Errorf("deployment failed (circuit breaker triggered)")
 			}
 
-			if status.RunningCount == status.DesiredCount && status.PendingCount == 0 {
+			if rollbackInProgress(expectedTaskDef, status) {
+				e.printFailureLogs(ctx, serviceName, status.Events, svc)
+				return fmt.Errorf("deployment rollback started: %s", status.RolloutStateReason)
+			}
+
+			if status.RolloutState == "" &&
+				status.DeploymentCount <= 1 &&
+				status.RunningCount == status.DesiredCount &&
+				status.PendingCount == 0 {
+				if rollbackDetected(expectedTaskDef, status) {
+					return fmt.Errorf("deployment rolled back to %s", status.TaskDefinition)
+				}
 				return nil
 			}
 		}
 	}
+}
+
+func rollbackDetected(expectedTaskDef string, status *aws.DeploymentStatus) bool {
+	if expectedTaskDef == "" || status == nil || status.TaskDefinition == "" {
+		return false
+	}
+	if taskDefArnMatches(status.TaskDefinition, expectedTaskDef) {
+		return false
+	}
+	return status.RolloutState == "COMPLETED" || status.DeploymentCount <= 1
+}
+
+func rollbackInProgress(expectedTaskDef string, status *aws.DeploymentStatus) bool {
+	if status == nil || status.RolloutStateReason == "" {
+		return false
+	}
+	reason := strings.ToLower(status.RolloutStateReason)
+	if strings.Contains(reason, "rollback") || strings.Contains(reason, "circuit breaker") {
+		return true
+	}
+	if expectedTaskDef == "" || status.TaskDefinition == "" {
+		return false
+	}
+	if taskDefArnMatches(status.TaskDefinition, expectedTaskDef) {
+		return false
+	}
+	return status.DeploymentCount > 1
+}
+
+func taskDefArnMatches(currentArn, desiredArn string) bool {
+	currentKey := taskDefKey(currentArn)
+	desiredKey := taskDefKey(desiredArn)
+	if desiredKey == "" {
+		return false
+	}
+	if strings.Contains(desiredKey, ":") {
+		return currentKey == desiredKey
+	}
+	return taskDefFamily(currentKey) == taskDefFamily(desiredKey)
+}
+
+func taskDefKey(arn string) string {
+	if arn == "" {
+		return arn
+	}
+	family := arn
+	if idx := strings.LastIndex(arn, "/"); idx >= 0 && idx < len(arn)-1 {
+		family = arn[idx+1:]
+	}
+	return family
+}
+
+func taskDefFamily(key string) string {
+	if idx := strings.LastIndex(key, ":"); idx > 0 {
+		return key[:idx]
+	}
+	return key
 }
 
 func (e *Executor) applyScheduledTasks(ctx context.Context, plan *ExecutionPlan) error {
@@ -542,8 +763,121 @@ func (e *Executor) resolveIngressTargetGroups(plan *ExecutionPlan, targetGroupAr
 			continue
 		}
 
+		desiredName := ""
+		desiredCluster := ""
+		desiredTaskDef := ""
+		if node.Resource.Desired != nil {
+			desiredName = node.Resource.Desired.Name
+			desiredCluster = node.Resource.Desired.Cluster
+			desiredTaskDef = node.Resource.Desired.TaskDefinition
+		}
+
+		if desiredName != "" {
+			updated.Name = desiredName
+		}
+		if updated.Cluster == "" && desiredCluster != "" {
+			updated.Cluster = desiredCluster
+		}
+		if updated.TaskDefinition == "" && desiredTaskDef != "" {
+			updated.TaskDefinition = desiredTaskDef
+		}
+
 		node.Resource.Desired = new(config.Service)
 		*node.Resource.Desired = updated
 		node.Resource.RecalculateAction()
 	}
+}
+
+// printFailureLogs fetches stopped tasks via API and prints their logs
+func (e *Executor) printFailureLogs(ctx context.Context, serviceName string, events []aws.ServiceEvent, svc *resources.ServiceResource) {
+	if e.cloudwatchClient == nil || e.logLines == 0 || e.ecsClient == nil {
+		return
+	}
+
+	// Get stopped tasks via API
+	stoppedTasks, err := e.ecsClient.GetStoppedTasks(ctx, serviceName, 3)
+	if err != nil {
+		log.Debug("failed to get stopped tasks", "error", err, "service", serviceName)
+		return
+	}
+
+	if len(stoppedTasks) == 0 {
+		return
+	}
+
+	// Get log configuration from task definition
+	logGroup := ""
+	logStreamPrefix := ""
+	containerName := ""
+
+	taskDefArn := ""
+	if len(stoppedTasks) > 0 {
+		taskDefArn = stoppedTasks[0].TaskDefinitionArn
+	} else if svc != nil && svc.TaskDefinitionArn != "" {
+		taskDefArn = svc.TaskDefinitionArn
+	}
+
+	if taskDefArn != "" {
+		taskDef, err := e.ecsClient.DescribeTaskDefinition(ctx, taskDefArn)
+		if err == nil && taskDef != nil && len(taskDef.ContainerDefinitions) > 0 {
+			for _, container := range taskDef.ContainerDefinitions {
+				if container.LogConfiguration != nil && container.LogConfiguration.LogDriver == "awslogs" {
+					opts := container.LogConfiguration.Options
+					if opts != nil {
+						logGroup = opts["awslogs-group"]
+						logStreamPrefix = opts["awslogs-stream-prefix"]
+						if container.Name != nil {
+							containerName = *container.Name
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if logGroup == "" || containerName == "" {
+		log.Debug("unable to determine log configuration", "service", serviceName)
+		return
+	}
+
+	// Print stop reason and logs for each failed task
+	for _, task := range stoppedTasks {
+		if task.StoppedReason != "" {
+			e.tracker.PrintLogs(serviceName, []string{
+				fmt.Sprintf("Task %s stopped: %s", task.TaskID[:8], task.StoppedReason),
+			})
+		}
+
+		// Build log stream name: {prefix}/{container}/{taskID}
+		logStream := fmt.Sprintf("%s/%s/%s", logStreamPrefix, containerName, task.TaskID)
+		if logStreamPrefix == "" {
+			logStream = fmt.Sprintf("ecs/%s/%s", containerName, task.TaskID)
+		}
+
+		logs := e.fetchFailureLogs(ctx, logGroup, logStream)
+		if len(logs) > 0 {
+			e.tracker.PrintLogs(serviceName, logs)
+		}
+	}
+}
+
+// fetchFailureLogs fetches CloudWatch logs for a failed task.
+func (e *Executor) fetchFailureLogs(ctx context.Context, logGroup, logStream string) []string {
+	if e.cloudwatchClient == nil || e.logLines == 0 {
+		return nil
+	}
+
+	limit := e.logLines
+	if limit < 0 {
+		limit = 0 // fetch all
+	}
+
+	logs, err := e.cloudwatchClient.GetLogEvents(ctx, logGroup, logStream, limit)
+	if err != nil {
+		log.Debug("failed to fetch logs", "error", err, "logGroup", logGroup, "logStream", logStream)
+		return nil
+	}
+
+	return logs
 }

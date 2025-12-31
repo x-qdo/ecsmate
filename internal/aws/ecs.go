@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -197,15 +198,40 @@ func (c *ECSClient) ListTaskDefinitions(ctx context.Context, familyPrefix string
 	return arns, nil
 }
 
-type DeploymentStatus struct {
-	Service        string
+type ServiceEvent struct {
+	ID        string
+	Message   string
+	CreatedAt time.Time
+}
+
+type DeploymentInfo struct {
+	ID             string
+	Status         string
+	TaskDefinition string
 	DesiredCount   int32
 	RunningCount   int32
 	PendingCount   int32
-	DeploymentID   string
-	Status         string
-	TaskDefinition string
+	FailedTasks    int32
 	RolloutState   string
+}
+
+type DeploymentStatus struct {
+	Service            string
+	DesiredCount       int32
+	RunningCount       int32
+	PendingCount       int32
+	DeploymentCount    int
+	DeploymentID       string
+	Status             string
+	TaskDefinition     string
+	RolloutState       string
+	RolloutStateReason string
+	Events             []ServiceEvent
+
+	// Deployment tracking
+	PrimaryDeployment *DeploymentInfo // New deployment being rolled out
+	ActiveDeployment  *DeploymentInfo // Previous deployment being replaced
+	IsRollingBack     bool
 }
 
 func (c *ECSClient) GetDeploymentStatus(ctx context.Context, serviceName string) (*DeploymentStatus, error) {
@@ -220,22 +246,56 @@ func (c *ECSClient) GetDeploymentStatus(ctx context.Context, serviceName string)
 
 	svc := services[0]
 	status := &DeploymentStatus{
-		Service:        serviceName,
-		DesiredCount:   svc.DesiredCount,
-		RunningCount:   svc.RunningCount,
-		PendingCount:   svc.PendingCount,
-		TaskDefinition: aws.ToString(svc.TaskDefinition),
-		Status:         aws.ToString(svc.Status),
+		Service:         serviceName,
+		DesiredCount:    svc.DesiredCount,
+		RunningCount:    svc.RunningCount,
+		PendingCount:    svc.PendingCount,
+		DeploymentCount: len(svc.Deployments),
+		TaskDefinition:  aws.ToString(svc.TaskDefinition),
+		Status:          aws.ToString(svc.Status),
 	}
 
 	for _, d := range svc.Deployments {
-		if aws.ToString(d.Status) == "PRIMARY" {
-			status.DeploymentID = aws.ToString(d.Id)
+		depInfo := &DeploymentInfo{
+			ID:             aws.ToString(d.Id),
+			Status:         aws.ToString(d.Status),
+			TaskDefinition: aws.ToString(d.TaskDefinition),
+			DesiredCount:   d.DesiredCount,
+			RunningCount:   d.RunningCount,
+			PendingCount:   d.PendingCount,
+			FailedTasks:    d.FailedTasks,
+			RolloutState:   string(d.RolloutState),
+		}
+
+		switch aws.ToString(d.Status) {
+		case "PRIMARY":
+			status.PrimaryDeployment = depInfo
+			status.DeploymentID = depInfo.ID
 			if d.RolloutState != "" {
 				status.RolloutState = string(d.RolloutState)
 			}
-			break
+			status.RolloutStateReason = aws.ToString(d.RolloutStateReason)
+
+			// Detect rollback from reason
+			reason := strings.ToLower(status.RolloutStateReason)
+			if strings.Contains(reason, "rollback") || strings.Contains(reason, "circuit breaker") {
+				status.IsRollingBack = true
+			}
+		case "ACTIVE":
+			status.ActiveDeployment = depInfo
 		}
+	}
+
+	// Collect recent events (AWS returns them newest first, limited to 100)
+	for _, e := range svc.Events {
+		event := ServiceEvent{
+			ID:      aws.ToString(e.Id),
+			Message: aws.ToString(e.Message),
+		}
+		if e.CreatedAt != nil {
+			event.CreatedAt = *e.CreatedAt
+		}
+		status.Events = append(status.Events, event)
 	}
 
 	return status, nil
@@ -264,4 +324,130 @@ func (c *ECSClient) UpdateServiceTaskDefinition(ctx context.Context, serviceName
 // GetCluster returns the cluster name
 func (c *ECSClient) GetCluster() string {
 	return c.cluster
+}
+
+// TaskInfo contains information about an ECS task
+type TaskInfo struct {
+	TaskArn           string
+	TaskID            string
+	TaskDefinitionArn string
+	LastStatus        string
+	DesiredStatus     string
+	StopCode          string
+	StoppedReason     string
+	StartedAt         *time.Time
+	StoppedAt         *time.Time
+	Containers        []ContainerInfo
+}
+
+// ContainerInfo contains information about a container in a task
+type ContainerInfo struct {
+	Name         string
+	LastStatus   string
+	ExitCode     *int32
+	Reason       string
+	RuntimeID    string
+	LogGroupName string
+	LogStreamPrefix string
+}
+
+// ListServiceTasks lists tasks for a service, optionally filtering by status
+func (c *ECSClient) ListServiceTasks(ctx context.Context, serviceName string, desiredStatus string) ([]string, error) {
+	log.Debug("listing tasks for service", "service", serviceName, "desiredStatus", desiredStatus)
+
+	input := &ecs.ListTasksInput{
+		Cluster:     aws.String(c.cluster),
+		ServiceName: aws.String(serviceName),
+	}
+	if desiredStatus != "" {
+		input.DesiredStatus = types.DesiredStatus(desiredStatus)
+	}
+
+	var taskArns []string
+	paginator := ecs.NewListTasksPaginator(c.client, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list tasks: %w", err)
+		}
+		taskArns = append(taskArns, page.TaskArns...)
+	}
+
+	return taskArns, nil
+}
+
+// DescribeTasks describes the specified tasks
+func (c *ECSClient) DescribeTasks(ctx context.Context, taskArns []string) ([]TaskInfo, error) {
+	if len(taskArns) == 0 {
+		return nil, nil
+	}
+
+	log.Debug("describing tasks", "count", len(taskArns))
+
+	out, err := c.client.DescribeTasks(ctx, &ecs.DescribeTasksInput{
+		Cluster: aws.String(c.cluster),
+		Tasks:   taskArns,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe tasks: %w", err)
+	}
+
+	var tasks []TaskInfo
+	for _, task := range out.Tasks {
+		taskArn := aws.ToString(task.TaskArn)
+		taskID := extractTaskIDFromArn(taskArn)
+
+		info := TaskInfo{
+			TaskArn:           taskArn,
+			TaskID:            taskID,
+			TaskDefinitionArn: aws.ToString(task.TaskDefinitionArn),
+			LastStatus:        aws.ToString(task.LastStatus),
+			DesiredStatus:     aws.ToString(task.DesiredStatus),
+			StopCode:          string(task.StopCode),
+			StoppedReason:     aws.ToString(task.StoppedReason),
+			StartedAt:         task.StartedAt,
+			StoppedAt:         task.StoppedAt,
+		}
+
+		for _, container := range task.Containers {
+			ci := ContainerInfo{
+				Name:       aws.ToString(container.Name),
+				LastStatus: aws.ToString(container.LastStatus),
+				ExitCode:   container.ExitCode,
+				Reason:     aws.ToString(container.Reason),
+				RuntimeID:  aws.ToString(container.RuntimeId),
+			}
+			info.Containers = append(info.Containers, ci)
+		}
+
+		tasks = append(tasks, info)
+	}
+
+	return tasks, nil
+}
+
+// GetStoppedTasks returns recently stopped tasks for a service
+func (c *ECSClient) GetStoppedTasks(ctx context.Context, serviceName string, limit int) ([]TaskInfo, error) {
+	taskArns, err := c.ListServiceTasks(ctx, serviceName, "STOPPED")
+	if err != nil {
+		return nil, err
+	}
+
+	if len(taskArns) == 0 {
+		return nil, nil
+	}
+
+	if limit > 0 && len(taskArns) > limit {
+		taskArns = taskArns[:limit]
+	}
+
+	return c.DescribeTasks(ctx, taskArns)
+}
+
+func extractTaskIDFromArn(arn string) string {
+	// ARN format: arn:aws:ecs:region:account:task/cluster/taskID
+	if idx := strings.LastIndex(arn, "/"); idx >= 0 && idx < len(arn)-1 {
+		return arn[idx+1:]
+	}
+	return arn
 }

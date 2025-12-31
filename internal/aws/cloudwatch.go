@@ -147,3 +147,62 @@ func (c *CloudWatchLogsClient) TagLogGroup(ctx context.Context, logGroupName str
 
 	return nil
 }
+
+// GetLogEvents fetches log events from a CloudWatch log stream.
+// If limit <= 0, fetches all events. Otherwise fetches up to limit events.
+// Returns log lines as strings, newest first.
+func (c *CloudWatchLogsClient) GetLogEvents(ctx context.Context, logGroup, logStream string, limit int) ([]string, error) {
+	log.Debug("getting log events", "logGroup", logGroup, "logStream", logStream, "limit", limit)
+
+	var allEvents []string
+	var nextToken *string
+
+	for {
+		input := &cloudwatchlogs.GetLogEventsInput{
+			LogGroupName:  aws.String(logGroup),
+			LogStreamName: aws.String(logStream),
+			StartFromHead: aws.Bool(false), // newest first
+		}
+		if nextToken != nil {
+			input.NextToken = nextToken
+		}
+		if limit > 0 {
+			remaining := limit - len(allEvents)
+			if remaining <= 0 {
+				break
+			}
+			if remaining > 10000 {
+				remaining = 10000
+			}
+			input.Limit = aws.Int32(int32(remaining))
+		}
+
+		out, err := c.client.GetLogEvents(ctx, input)
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				log.Debug("log stream not found", "logGroup", logGroup, "logStream", logStream)
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to get log events: %w", err)
+		}
+
+		for _, event := range out.Events {
+			allEvents = append(allEvents, aws.ToString(event.Message))
+		}
+
+		// Check if we should continue pagination
+		if out.NextForwardToken == nil || *out.NextForwardToken == "" {
+			break
+		}
+		if nextToken != nil && *nextToken == *out.NextForwardToken {
+			break // no more events
+		}
+		if limit > 0 && len(allEvents) >= limit {
+			break
+		}
+		nextToken = out.NextForwardToken
+	}
+
+	return allEvents, nil
+}

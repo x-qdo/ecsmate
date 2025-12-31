@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/fatih/color"
@@ -16,6 +17,7 @@ var (
 	statusWatch    bool
 	statusInterval int
 	statusService  string
+	statusEvents   int
 )
 
 var statusCmd = &cobra.Command{
@@ -47,6 +49,7 @@ func init() {
 	statusCmd.Flags().BoolVarP(&statusWatch, "watch", "w", false, "Watch status continuously")
 	statusCmd.Flags().IntVar(&statusInterval, "interval", 5, "Watch interval in seconds")
 	statusCmd.Flags().StringVar(&statusService, "service", "", "Show status for specific service")
+	statusCmd.Flags().IntVar(&statusEvents, "events", 5, "Number of recent events to show per service")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -61,19 +64,35 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if statusService != "" {
 		// Check specific service
 		if opts.Cluster == "" {
-			return fmt.Errorf("--cluster is required when using --service")
+			log.Error("--cluster is required when using --service")
+			os.Exit(ExitCodeError)
 		}
 		serviceNames = []string{statusService}
 		cluster = opts.Cluster
 	} else {
-		// Load manifest to get service names (no SSM resolution needed for status)
-		manifest, err := loadManifest(ctx, &opts, nil)
+		// Initialize SSM client for parameter resolution (cluster name comes from SSM)
+		var ssmClient *awsclient.SSMClient
+		if !opts.NoSSM {
+			var err error
+			ssmClient, err = awsclient.NewSSMClient(ctx, opts.Region)
+			if err != nil {
+				log.Warn("failed to initialize SSM client, SSM references will not be resolved", "error", err)
+			}
+		}
+
+		manifest, err := loadManifest(ctx, &opts, ssmClient)
 		if err != nil {
-			return err
+			log.Error("failed to load manifest", "error", err)
+			os.Exit(ExitCodeError)
 		}
 
 		for name, svc := range manifest.Services {
-			serviceNames = append(serviceNames, name)
+			// Build full service name with namespace prefix (e.g., "cal-web")
+			fullName := name
+			if manifest.Name != "" {
+				fullName = manifest.Name + "-" + name
+			}
+			serviceNames = append(serviceNames, fullName)
 			if cluster == "" {
 				cluster = svc.Cluster
 			}
@@ -90,12 +109,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		cluster = opts.Cluster
 	}
 	if cluster == "" {
-		return fmt.Errorf("no cluster specified (use --cluster or define in manifest)")
+		log.Error("no cluster specified (use --cluster or define in manifest)")
+		os.Exit(ExitCodeError)
 	}
 
 	ecsClient, err := awsclient.NewECSClient(ctx, opts.Region, cluster)
 	if err != nil {
-		return fmt.Errorf("failed to create ECS client: %w", err)
+		log.Error("failed to create ECS client", "error", err)
+		os.Exit(ExitCodeError)
 	}
 
 	if statusWatch {
@@ -119,27 +140,57 @@ func watchStatus(ctx context.Context, ecsClient *awsclient.ECSClient, serviceNam
 	ticker := time.NewTicker(time.Duration(statusInterval) * time.Second)
 	defer ticker.Stop()
 
+	// Track seen event IDs to detect new events
+	seenEvents := make(map[string]bool)
+
+	// Color functions for new events
+	cyan := color.New(color.FgCyan).SprintFunc()
+	yellow := color.New(color.FgYellow).SprintFunc()
+	if noColor {
+		cyan = fmt.Sprint
+		yellow = fmt.Sprint
+	}
+
 	// Initial render
 	statuses, err := getServiceStatuses(ctx, ecsClient, serviceNames)
 	if err != nil {
 		return err
 	}
+
+	// Mark all current events as seen
+	for _, status := range statuses {
+		for _, event := range status.Events {
+			seenEvents[event.ID] = true
+		}
+	}
+
 	renderStatus(statuses, noColor, true)
+	fmt.Println("  ─────────────────────────────────────────")
+	fmt.Println("  New events will appear below:")
+	fmt.Println()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			// Clear screen and move cursor to top
-			fmt.Print("\033[H\033[2J")
-
 			statuses, err := getServiceStatuses(ctx, ecsClient, serviceNames)
 			if err != nil {
 				log.Error("failed to get status", "error", err)
 				continue
 			}
-			renderStatus(statuses, noColor, true)
+
+			// Print any new events
+			for _, status := range statuses {
+				for i := len(status.Events) - 1; i >= 0; i-- {
+					event := status.Events[i]
+					if !seenEvents[event.ID] {
+						seenEvents[event.ID] = true
+						timestamp := event.CreatedAt.Local().Format("15:04:05")
+						fmt.Printf("  %s %s %s\n", cyan(timestamp), yellow(status.Service), event.Message)
+					}
+				}
+			}
 		}
 	}
 }
@@ -226,6 +277,20 @@ func renderStatus(statuses []*awsclient.DeploymentStatus, noColor bool, watchMod
 				rolloutColor = red
 			}
 			fmt.Printf("    Rollout: %s\n", rolloutColor(status.RolloutState))
+		}
+
+		// Recent events
+		if len(status.Events) > 0 && statusEvents > 0 {
+			fmt.Printf("    %s\n", bold("Recent Events:"))
+			count := statusEvents
+			if count > len(status.Events) {
+				count = len(status.Events)
+			}
+			for i := 0; i < count; i++ {
+				event := status.Events[i]
+				timestamp := event.CreatedAt.Local().Format("15:04:05")
+				fmt.Printf("      %s %s\n", cyan(timestamp), event.Message)
+			}
 		}
 
 		fmt.Println()

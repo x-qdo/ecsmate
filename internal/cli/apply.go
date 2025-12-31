@@ -21,6 +21,7 @@ var (
 	applyAutoApprove bool
 	applyNoWait      bool
 	applyTimeout     time.Duration
+	applyLogLines    int
 )
 
 var applyCmd = &cobra.Command{
@@ -45,6 +46,7 @@ func init() {
 	applyCmd.Flags().BoolVar(&applyAutoApprove, "auto-approve", false, "Skip interactive approval")
 	applyCmd.Flags().BoolVar(&applyNoWait, "no-wait", false, "Don't wait for deployments to complete")
 	applyCmd.Flags().DurationVar(&applyTimeout, "timeout", 15*time.Minute, "Timeout for waiting on deployments")
+	applyCmd.Flags().IntVar(&applyLogLines, "log-lines", -1, "Max log lines to show on task failure (-1=all, 0=none)")
 }
 
 func runApply(cmd *cobra.Command, args []string) error {
@@ -88,6 +90,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		ECSClient:          clients.ECS,
 		SchedulerClient:    clients.Scheduler,
 		AutoScalingClient:  clients.AutoScaling,
+		ELBV2Client:        clients.ELBV2,
 		SchedulerGroupName: manifest.Name,
 	})
 	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
@@ -135,6 +138,8 @@ func runApply(cmd *cobra.Command, args []string) error {
 	executor := engine.NewExecutor(engine.ExecutorConfig{
 		ECSClient:        clients.ECS,
 		SchedulerClient:  clients.Scheduler,
+		CloudWatchClient: clients.CloudWatch,
+		ELBV2Client:      clients.ELBV2,
 		TaskDefManager:   builder.TaskDefManager(),
 		ServiceManager:   builder.ServiceManager(),
 		ScheduledManager: builder.ScheduledTaskManager(),
@@ -142,6 +147,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		NoColor:          opts.NoColor,
 		NoWait:           applyNoWait,
 		Timeout:          applyTimeout,
+		LogLines:         applyLogLines,
 	})
 
 	if err := executor.Execute(ctx, execPlan, cluster); err != nil {
