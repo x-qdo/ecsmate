@@ -137,6 +137,9 @@ func (r *ServiceResource) ToCreateInput() (*ecs.CreateServiceInput, error) {
 	}
 
 	input.EnableExecuteCommand = svc.EnableExecuteCommand
+	if svc.HealthCheckGracePeriodSecondsSet {
+		input.HealthCheckGracePeriodSeconds = aws.Int32(int32(svc.HealthCheckGracePeriodSeconds))
+	}
 
 	if svc.NetworkConfiguration != nil {
 		input.NetworkConfiguration = buildNetworkConfiguration(svc.NetworkConfiguration)
@@ -211,9 +214,22 @@ func (r *ServiceResource) ToUpdateInput() (*ecs.UpdateServiceInput, error) {
 	}
 
 	input.EnableExecuteCommand = aws.Bool(svc.EnableExecuteCommand)
+	if svc.HealthCheckGracePeriodSecondsSet {
+		input.HealthCheckGracePeriodSeconds = aws.Int32(int32(svc.HealthCheckGracePeriodSeconds))
+	}
 
 	if svc.NetworkConfiguration != nil {
 		input.NetworkConfiguration = buildNetworkConfiguration(svc.NetworkConfiguration)
+	}
+
+	if len(svc.LoadBalancers) > 0 {
+		for _, lb := range svc.LoadBalancers {
+			input.LoadBalancers = append(input.LoadBalancers, types.LoadBalancer{
+				TargetGroupArn: aws.String(lb.TargetGroupArn),
+				ContainerName:  aws.String(lb.ContainerName),
+				ContainerPort:  aws.Int32(int32(lb.ContainerPort)),
+			})
+		}
 	}
 
 	deploymentConfig := buildDeploymentConfiguration(svc.Deployment)
@@ -378,11 +394,6 @@ func (resource *ServiceResource) checkRecreateRequired() []string {
 	// SchedulingStrategy cannot be changed after service creation
 	if desired.SchedulingStrategy != "" && string(current.SchedulingStrategy) != desired.SchedulingStrategy {
 		reasons = append(reasons, fmt.Sprintf("schedulingStrategy changed from %q to %q", current.SchedulingStrategy, desired.SchedulingStrategy))
-	}
-
-	// LoadBalancers cannot be changed after service creation (can only be specified at creation)
-	if resource.loadBalancersChanged() {
-		reasons = append(reasons, "loadBalancers changed (immutable after creation)")
 	}
 
 	// ServiceRegistries cannot be changed after service creation
@@ -574,6 +585,12 @@ func (resource *ServiceResource) hasChanges() bool {
 		return true
 	}
 
+	if desired.HealthCheckGracePeriodSecondsSet {
+		if aws.ToInt32(current.HealthCheckGracePeriodSeconds) != int32(desired.HealthCheckGracePeriodSeconds) {
+			return true
+		}
+	}
+
 	if current.NetworkConfiguration != nil && desired.NetworkConfiguration != nil {
 		currentVpc := current.NetworkConfiguration.AwsvpcConfiguration
 		desiredVpc := desired.NetworkConfiguration
@@ -590,10 +607,12 @@ func (resource *ServiceResource) hasChanges() bool {
 		currentDC := current.DeploymentConfiguration
 		desiredDC := desired.Deployment
 
-		if desiredDC.MinimumHealthyPercent > 0 && int(aws.ToInt32(currentDC.MinimumHealthyPercent)) != desiredDC.MinimumHealthyPercent {
+		if desiredDC.MinimumHealthyPercentSet &&
+			int(aws.ToInt32(currentDC.MinimumHealthyPercent)) != desiredDC.MinimumHealthyPercent {
 			return true
 		}
-		if desiredDC.MaximumPercent > 0 && int(aws.ToInt32(currentDC.MaximumPercent)) != desiredDC.MaximumPercent {
+		if desiredDC.MaximumPercentSet &&
+			int(aws.ToInt32(currentDC.MaximumPercent)) != desiredDC.MaximumPercent {
 			return true
 		}
 
@@ -607,6 +626,10 @@ func (resource *ServiceResource) hasChanges() bool {
 		} else if desiredDC.CircuitBreakerEnable {
 			return true
 		}
+	}
+
+	if resource.loadBalancersChanged() {
+		return true
 	}
 
 	return false

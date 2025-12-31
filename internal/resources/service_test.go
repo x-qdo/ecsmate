@@ -28,11 +28,13 @@ func TestServiceResource_ToCreateInput(t *testing.T) {
 				ContainerPort:  8080,
 			}},
 			Deployment: config.DeploymentConfig{
-				Strategy:               "rolling",
-				MinimumHealthyPercent:  50,
-				MaximumPercent:         200,
-				CircuitBreakerEnable:   true,
-				CircuitBreakerRollback: true,
+				Strategy:                 "rolling",
+				MinimumHealthyPercent:    50,
+				MaximumPercent:           200,
+				MinimumHealthyPercentSet: true,
+				MaximumPercentSet:        true,
+				CircuitBreakerEnable:     true,
+				CircuitBreakerRollback:   true,
 			},
 		},
 		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
@@ -93,8 +95,10 @@ func TestServiceResource_ToUpdateInput(t *testing.T) {
 			DesiredCount:    5,
 			PlatformVersion: "1.4.0",
 			Deployment: config.DeploymentConfig{
-				MinimumHealthyPercent: 100,
-				MaximumPercent:        200,
+				MinimumHealthyPercent:    100,
+				MaximumPercent:           200,
+				MinimumHealthyPercentSet: true,
+				MaximumPercentSet:        true,
 			},
 		},
 		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:2",
@@ -303,8 +307,10 @@ func TestServiceResource_HasChanges_DeploymentPercents(t *testing.T) {
 		Desired: &config.Service{
 			Name: "web",
 			Deployment: config.DeploymentConfig{
-				MinimumHealthyPercent: 50,
-				MaximumPercent:        200,
+				MinimumHealthyPercent:    50,
+				MaximumPercent:           200,
+				MinimumHealthyPercentSet: true,
+				MaximumPercentSet:        true,
 			},
 		},
 		Current: &types.Service{
@@ -385,7 +391,6 @@ func TestExtractRevision(t *testing.T) {
 		})
 	}
 }
-
 
 func TestBuildNetworkConfiguration(t *testing.T) {
 	nc := &config.NetworkConfiguration{
@@ -471,7 +476,7 @@ func TestServiceResource_DetermineAction_Recreate_SchedulingStrategyChanged(t *t
 	}
 }
 
-func TestServiceResource_DetermineAction_Recreate_LoadBalancersChanged(t *testing.T) {
+func TestServiceResource_DetermineAction_Update_LoadBalancersChanged(t *testing.T) {
 	resource := &ServiceResource{
 		Name: "web",
 		Desired: &config.Service{
@@ -500,18 +505,28 @@ func TestServiceResource_DetermineAction_Recreate_LoadBalancersChanged(t *testin
 
 	resource.determineAction()
 
-	if resource.Action != ServiceActionRecreate {
-		t.Errorf("expected action RECREATE, got %s", resource.Action)
+	if resource.Action != ServiceActionUpdate {
+		t.Errorf("expected action UPDATE, got %s", resource.Action)
 	}
-	foundReason := false
-	for _, reason := range resource.RecreateReasons {
-		if reason == "loadBalancers changed (immutable after creation)" {
-			foundReason = true
-			break
-		}
+}
+
+func TestServiceResource_HasChanges_HealthCheckGracePeriod(t *testing.T) {
+	resource := &ServiceResource{
+		Desired: &config.Service{
+			Name:                             "web",
+			Cluster:                          "test",
+			HealthCheckGracePeriodSeconds:    30,
+			HealthCheckGracePeriodSecondsSet: true,
+		},
+		Current: &types.Service{
+			ServiceName:                   aws.String("web"),
+			HealthCheckGracePeriodSeconds: aws.Int32(10),
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
 	}
-	if !foundReason {
-		t.Errorf("expected load balancer change reason, got: %v", resource.RecreateReasons)
+
+	if !resource.hasChanges() {
+		t.Fatal("expected healthCheckGracePeriodSeconds change to be detected")
 	}
 }
 
@@ -959,4 +974,3 @@ func TestServiceResource_Validate_InvalidServiceRegistry(t *testing.T) {
 		t.Error("expected error for invalid service registry")
 	}
 }
-

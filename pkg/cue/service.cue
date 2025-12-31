@@ -9,6 +9,7 @@ package schema
 	capacityProviderStrategy?: [...#CapacityProviderStrategyItem]
 	platformVersion?:     string
 	enableExecuteCommand?: bool
+	healthCheckGracePeriodSeconds?: int & >=0
 
 	networkConfiguration?: #NetworkConfiguration
 	loadBalancers?: [...#LoadBalancer]

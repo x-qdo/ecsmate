@@ -26,10 +26,10 @@ func NewDeploymentManager(ecsClient *awsclient.ECSClient) *DeploymentManager {
 func BuildDeploymentConfiguration(dc config.DeploymentConfig) *types.DeploymentConfiguration {
 	deployConfig := &types.DeploymentConfiguration{}
 
-	if dc.MinimumHealthyPercent > 0 {
+	if dc.MinimumHealthyPercentSet {
 		deployConfig.MinimumHealthyPercent = aws.Int32(int32(dc.MinimumHealthyPercent))
 	}
-	if dc.MaximumPercent > 0 {
+	if dc.MaximumPercentSet {
 		deployConfig.MaximumPercent = aws.Int32(int32(dc.MaximumPercent))
 	}
 
@@ -238,4 +238,3 @@ func defaultGradualSteps() []config.GradualStep {
 func (m *DeploymentManager) WaitForSteadyState(ctx context.Context, serviceName string) error {
 	return m.ecsClient.WaitForSteadyState(ctx, serviceName)
 }
-

@@ -10,11 +10,13 @@ import (
 
 func TestBuildDeploymentConfiguration_Rolling(t *testing.T) {
 	dc := config.DeploymentConfig{
-		Strategy:               "rolling",
-		MinimumHealthyPercent:  50,
-		MaximumPercent:         200,
-		CircuitBreakerEnable:   true,
-		CircuitBreakerRollback: true,
+		Strategy:                 "rolling",
+		MinimumHealthyPercent:    50,
+		MaximumPercent:           200,
+		MinimumHealthyPercentSet: true,
+		MaximumPercentSet:        true,
+		CircuitBreakerEnable:     true,
+		CircuitBreakerRollback:   true,
 	}
 
 	result := BuildDeploymentConfiguration(dc)

@@ -34,6 +34,12 @@ func TestParseManifest_Basic(t *testing.T) {
 				taskDefinition: "web"
 				desiredCount: 3
 				launchType: "FARGATE"
+				healthCheckGracePeriodSeconds: 25
+				loadBalancers: [{
+					targetGroupArn: "arn:aws:elasticloadbalancing:us-east-1:123456789:targetgroup/test/abc123"
+					containerName: "app"
+					containerPort: 80
+				}]
 			}
 		}
 	}`
@@ -103,6 +109,15 @@ func TestParseManifest_Basic(t *testing.T) {
 	}
 	if svc.DesiredCount != 3 {
 		t.Errorf("expected desiredCount 3, got %d", svc.DesiredCount)
+	}
+	if !svc.HealthCheckGracePeriodSecondsSet || svc.HealthCheckGracePeriodSeconds != 25 {
+		t.Errorf("expected healthCheckGracePeriodSeconds 25, got %d", svc.HealthCheckGracePeriodSeconds)
+	}
+	if len(svc.LoadBalancers) != 1 {
+		t.Fatalf("expected 1 load balancer, got %d", len(svc.LoadBalancers))
+	}
+	if svc.LoadBalancers[0].TargetGroupArn == "" {
+		t.Error("expected loadBalancer targetGroupArn to be set")
 	}
 }
 
@@ -335,8 +350,14 @@ func TestParseManifest_ServiceDeployment(t *testing.T) {
 	if svc.Deployment.MinimumHealthyPercent != 50 {
 		t.Errorf("expected minimumHealthyPercent 50, got %d", svc.Deployment.MinimumHealthyPercent)
 	}
+	if !svc.Deployment.MinimumHealthyPercentSet {
+		t.Error("expected minimumHealthyPercent to be marked as set")
+	}
 	if svc.Deployment.MaximumPercent != 200 {
 		t.Errorf("expected maximumPercent 200, got %d", svc.Deployment.MaximumPercent)
+	}
+	if !svc.Deployment.MaximumPercentSet {
+		t.Error("expected maximumPercent to be marked as set")
 	}
 	if !svc.Deployment.CircuitBreakerEnable {
 		t.Error("expected circuit breaker to be enabled")

@@ -86,16 +86,16 @@ type TaskDefinition struct {
 	Type string // managed, merged, remote
 
 	// For managed type
-	Family                   string
-	CPU                      string
-	Memory                   string
-	NetworkMode              string
-	RequiresCompatibilities  []string
-	ExecutionRoleArn         string
-	TaskRoleArn              string
-	ContainerDefinitions     []ContainerDefinition
-	Volumes                  []Volume
-	RuntimePlatform          *RuntimePlatform
+	Family                  string
+	CPU                     string
+	Memory                  string
+	NetworkMode             string
+	RequiresCompatibilities []string
+	ExecutionRoleArn        string
+	TaskRoleArn             string
+	ContainerDefinitions    []ContainerDefinition
+	Volumes                 []Volume
+	RuntimePlatform         *RuntimePlatform
 
 	// For merged type
 	BaseArn   string
@@ -233,22 +233,24 @@ type ContainerDependency struct {
 }
 
 type Service struct {
-	Name                     string
-	Cluster                  string
-	TaskDefinition           string
-	DesiredCount             int
-	LaunchType               string
-	CapacityProviderStrategy []CapacityProviderStrategyItem
-	PlatformVersion          string
-	SchedulingStrategy       string // REPLICA or DAEMON
-	DeploymentController     string // ECS, CODE_DEPLOY, or EXTERNAL
-	EnableExecuteCommand     bool
-	NetworkConfiguration     *NetworkConfiguration
-	LoadBalancers            []LoadBalancer
-	ServiceRegistries        []ServiceRegistry
-	Deployment               DeploymentConfig
-	DependsOn                []string
-	AutoScaling              *AutoScalingConfig
+	Name                             string
+	Cluster                          string
+	TaskDefinition                   string
+	DesiredCount                     int
+	LaunchType                       string
+	CapacityProviderStrategy         []CapacityProviderStrategyItem
+	PlatformVersion                  string
+	SchedulingStrategy               string // REPLICA or DAEMON
+	DeploymentController             string // ECS, CODE_DEPLOY, or EXTERNAL
+	EnableExecuteCommand             bool
+	HealthCheckGracePeriodSeconds    int
+	HealthCheckGracePeriodSecondsSet bool
+	NetworkConfiguration             *NetworkConfiguration
+	LoadBalancers                    []LoadBalancer
+	ServiceRegistries                []ServiceRegistry
+	Deployment                       DeploymentConfig
+	DependsOn                        []string
+	AutoScaling                      *AutoScalingConfig
 }
 
 type CapacityProviderStrategyItem struct {
@@ -280,10 +282,12 @@ type DeploymentConfig struct {
 	Strategy string // rolling, gradual
 
 	// Rolling/Gradual config
-	MinimumHealthyPercent  int
-	MaximumPercent         int
-	CircuitBreakerEnable   bool
-	CircuitBreakerRollback bool
+	MinimumHealthyPercent    int
+	MaximumPercent           int
+	MinimumHealthyPercentSet bool
+	MaximumPercentSet        bool
+	CircuitBreakerEnable     bool
+	CircuitBreakerRollback   bool
 
 	// Deployment alarms (ECS native)
 	Alarms              []string
@@ -305,20 +309,20 @@ type AutoScalingConfig struct {
 }
 
 type ScalingPolicy struct {
-	Name              string
-	Type              string // TargetTrackingScaling, StepScaling
-	TargetValue       float64
-	PredefinedMetric  string
-	CustomMetricSpec  *CustomMetricSpec
-	ScaleInCooldown   int
-	ScaleOutCooldown  int
+	Name             string
+	Type             string // TargetTrackingScaling, StepScaling
+	TargetValue      float64
+	PredefinedMetric string
+	CustomMetricSpec *CustomMetricSpec
+	ScaleInCooldown  int
+	ScaleOutCooldown int
 }
 
 type CustomMetricSpec struct {
-	Namespace   string
-	MetricName  string
-	Dimensions  []MetricDimension
-	Statistic   string
+	Namespace  string
+	MetricName string
+	Dimensions []MetricDimension
+	Statistic  string
 }
 
 type MetricDimension struct {
@@ -663,6 +667,10 @@ func parseService(name string, v cue.Value) (Service, error) {
 	if lt, err := ExtractString(v, "launchType"); err == nil {
 		svc.LaunchType = lt
 	}
+	if grace, err := ExtractInt(v, "healthCheckGracePeriodSeconds"); err == nil {
+		svc.HealthCheckGracePeriodSeconds = int(grace)
+		svc.HealthCheckGracePeriodSecondsSet = true
+	}
 
 	// Parse capacity provider strategy
 	cpStrategy := v.LookupPath(cue.ParsePath("capacityProviderStrategy"))
@@ -704,6 +712,27 @@ func parseService(name string, v cue.Value) (Service, error) {
 		}
 	}
 
+	// Parse load balancers
+	loadBalancers := v.LookupPath(cue.ParsePath("loadBalancers"))
+	if loadBalancers.Exists() {
+		iter, err := loadBalancers.List()
+		if err == nil {
+			for iter.Next() {
+				lb := LoadBalancer{}
+				if arn, err := ExtractString(iter.Value(), "targetGroupArn"); err == nil {
+					lb.TargetGroupArn = arn
+				}
+				if name, err := ExtractString(iter.Value(), "containerName"); err == nil {
+					lb.ContainerName = name
+				}
+				if port, err := ExtractInt(iter.Value(), "containerPort"); err == nil {
+					lb.ContainerPort = int(port)
+				}
+				svc.LoadBalancers = append(svc.LoadBalancers, lb)
+			}
+		}
+	}
+
 	// Parse service registries
 	serviceRegistries := v.LookupPath(cue.ParsePath("serviceRegistries"))
 	if serviceRegistries.Exists() {
@@ -740,9 +769,11 @@ func parseService(name string, v cue.Value) (Service, error) {
 			// Common deployment config
 			if mhp, err := ExtractInt(config, "minimumHealthyPercent"); err == nil {
 				svc.Deployment.MinimumHealthyPercent = int(mhp)
+				svc.Deployment.MinimumHealthyPercentSet = true
 			}
 			if mp, err := ExtractInt(config, "maximumPercent"); err == nil {
 				svc.Deployment.MaximumPercent = int(mp)
+				svc.Deployment.MaximumPercentSet = true
 			}
 
 			// Circuit breaker
