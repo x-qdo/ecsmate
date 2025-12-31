@@ -90,11 +90,28 @@ func (r *TaskDefResource) ToRegisterInput() (*ecs.RegisterTaskDefinitionInput, e
 			}
 		}
 		if vol.EFSVolumeConfiguration != nil {
-			volume.EfsVolumeConfiguration = &types.EFSVolumeConfiguration{
-				FileSystemId:      aws.String(vol.EFSVolumeConfiguration.FileSystemID),
-				RootDirectory:     aws.String(vol.EFSVolumeConfiguration.RootDirectory),
-				TransitEncryption: types.EFSTransitEncryption(vol.EFSVolumeConfiguration.TransitEncryption),
+			efsConfig := &types.EFSVolumeConfiguration{
+				FileSystemId: aws.String(vol.EFSVolumeConfiguration.FileSystemID),
 			}
+			if vol.EFSVolumeConfiguration.RootDirectory != "" {
+				efsConfig.RootDirectory = aws.String(vol.EFSVolumeConfiguration.RootDirectory)
+			}
+			if vol.EFSVolumeConfiguration.TransitEncryption != "" {
+				efsConfig.TransitEncryption = types.EFSTransitEncryption(vol.EFSVolumeConfiguration.TransitEncryption)
+			}
+			if vol.EFSVolumeConfiguration.TransitEncryptionPort > 0 {
+				efsConfig.TransitEncryptionPort = aws.Int32(int32(vol.EFSVolumeConfiguration.TransitEncryptionPort))
+			}
+			if vol.EFSVolumeConfiguration.AuthorizationConfig != nil {
+				efsConfig.AuthorizationConfig = &types.EFSAuthorizationConfig{}
+				if vol.EFSVolumeConfiguration.AuthorizationConfig.AccessPointID != "" {
+					efsConfig.AuthorizationConfig.AccessPointId = aws.String(vol.EFSVolumeConfiguration.AuthorizationConfig.AccessPointID)
+				}
+				if vol.EFSVolumeConfiguration.AuthorizationConfig.IAM != "" {
+					efsConfig.AuthorizationConfig.Iam = types.EFSAuthorizationConfigIAM(vol.EFSVolumeConfiguration.AuthorizationConfig.IAM)
+				}
+			}
+			volume.EfsVolumeConfiguration = efsConfig
 		}
 		input.Volumes = append(input.Volumes, volume)
 	}
@@ -198,6 +215,30 @@ func convertContainerDefinition(cd config.ContainerDefinition) types.ContainerDe
 		containerDef.DependsOn = append(containerDef.DependsOn, types.ContainerDependency{
 			ContainerName: aws.String(dep.ContainerName),
 			Condition:     types.ContainerCondition(dep.Condition),
+		})
+	}
+
+	if cd.LinuxParameters != nil {
+		containerDef.LinuxParameters = &types.LinuxParameters{}
+		if cd.LinuxParameters.InitProcessEnabled {
+			containerDef.LinuxParameters.InitProcessEnabled = aws.Bool(true)
+		}
+		if cd.LinuxParameters.Capabilities != nil {
+			containerDef.LinuxParameters.Capabilities = &types.KernelCapabilities{}
+			if len(cd.LinuxParameters.Capabilities.Add) > 0 {
+				containerDef.LinuxParameters.Capabilities.Add = cd.LinuxParameters.Capabilities.Add
+			}
+			if len(cd.LinuxParameters.Capabilities.Drop) > 0 {
+				containerDef.LinuxParameters.Capabilities.Drop = cd.LinuxParameters.Capabilities.Drop
+			}
+		}
+	}
+
+	for _, ul := range cd.Ulimits {
+		containerDef.Ulimits = append(containerDef.Ulimits, types.Ulimit{
+			Name:      types.UlimitName(ul.Name),
+			SoftLimit: int32(ul.SoftLimit),
+			HardLimit: int32(ul.HardLimit),
 		})
 	}
 
@@ -436,6 +477,27 @@ func convertECSContainerDefinition(cd types.ContainerDefinition) config.Containe
 		result.DependsOn = append(result.DependsOn, config.ContainerDependency{
 			ContainerName: aws.ToString(dep.ContainerName),
 			Condition:     string(dep.Condition),
+		})
+	}
+
+	if cd.LinuxParameters != nil {
+		result.LinuxParameters = &config.LinuxParameters{}
+		if cd.LinuxParameters.InitProcessEnabled != nil {
+			result.LinuxParameters.InitProcessEnabled = *cd.LinuxParameters.InitProcessEnabled
+		}
+		if cd.LinuxParameters.Capabilities != nil {
+			result.LinuxParameters.Capabilities = &config.KernelCapabilities{
+				Add:  cd.LinuxParameters.Capabilities.Add,
+				Drop: cd.LinuxParameters.Capabilities.Drop,
+			}
+		}
+	}
+
+	for _, ul := range cd.Ulimits {
+		result.Ulimits = append(result.Ulimits, config.Ulimit{
+			Name:      string(ul.Name),
+			SoftLimit: int(ul.SoftLimit),
+			HardLimit: int(ul.HardLimit),
 		})
 	}
 

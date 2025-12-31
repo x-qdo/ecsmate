@@ -69,6 +69,24 @@ type ContainerDefinition struct {
 	HealthCheck      *HealthCheck
 	LogConfiguration *LogConfiguration
 	DependsOn        []ContainerDependency
+	LinuxParameters  *LinuxParameters
+	Ulimits          []Ulimit
+}
+
+type LinuxParameters struct {
+	InitProcessEnabled bool
+	Capabilities       *KernelCapabilities
+}
+
+type KernelCapabilities struct {
+	Add  []string
+	Drop []string
+}
+
+type Ulimit struct {
+	Name      string // core, cpu, data, fsize, locks, memlock, msgqueue, nice, nofile, nproc, rss, rtprio, rttime, sigpending, stack
+	SoftLimit int
+	HardLimit int
 }
 
 type ContainerOverride struct {
@@ -112,9 +130,16 @@ type Volume struct {
 }
 
 type EFSVolumeConfig struct {
-	FileSystemID    string
-	RootDirectory   string
-	TransitEncryption string
+	FileSystemID          string
+	RootDirectory         string
+	TransitEncryption     string
+	TransitEncryptionPort int
+	AuthorizationConfig   *EFSAuthConfig
+}
+
+type EFSAuthConfig struct {
+	AccessPointID string
+	IAM           string // ENABLED or DISABLED
 }
 
 type HealthCheck struct {
@@ -137,21 +162,28 @@ type ContainerDependency struct {
 }
 
 type Service struct {
-	Name                 string
-	Cluster              string
-	TaskDefinition       string
-	DesiredCount         int
-	LaunchType           string
-	PlatformVersion      string
-	SchedulingStrategy   string // REPLICA or DAEMON
-	DeploymentController string // ECS, CODE_DEPLOY, or EXTERNAL
-	EnableExecuteCommand bool
-	NetworkConfiguration *NetworkConfiguration
-	LoadBalancers        []LoadBalancer
-	ServiceRegistries    []ServiceRegistry
-	Deployment           DeploymentConfig
-	DependsOn            []string
-	AutoScaling          *AutoScalingConfig
+	Name                     string
+	Cluster                  string
+	TaskDefinition           string
+	DesiredCount             int
+	LaunchType               string
+	CapacityProviderStrategy []CapacityProviderStrategyItem
+	PlatformVersion          string
+	SchedulingStrategy       string // REPLICA or DAEMON
+	DeploymentController     string // ECS, CODE_DEPLOY, or EXTERNAL
+	EnableExecuteCommand     bool
+	NetworkConfiguration     *NetworkConfiguration
+	LoadBalancers            []LoadBalancer
+	ServiceRegistries        []ServiceRegistry
+	Deployment               DeploymentConfig
+	DependsOn                []string
+	AutoScaling              *AutoScalingConfig
+}
+
+type CapacityProviderStrategyItem struct {
+	CapacityProvider string
+	Weight           int
+	Base             int
 }
 
 type ServiceRegistry struct {
@@ -525,6 +557,28 @@ func parseService(name string, v cue.Value) (Service, error) {
 	if lt, err := ExtractString(v, "launchType"); err == nil {
 		svc.LaunchType = lt
 	}
+
+	// Parse capacity provider strategy
+	cpStrategy := v.LookupPath(cue.ParsePath("capacityProviderStrategy"))
+	if cpStrategy.Exists() {
+		iter, err := cpStrategy.List()
+		if err == nil {
+			for iter.Next() {
+				item := CapacityProviderStrategyItem{}
+				if cp, err := ExtractString(iter.Value(), "capacityProvider"); err == nil {
+					item.CapacityProvider = cp
+				}
+				if weight, err := ExtractInt(iter.Value(), "weight"); err == nil {
+					item.Weight = int(weight)
+				}
+				if base, err := ExtractInt(iter.Value(), "base"); err == nil {
+					item.Base = int(base)
+				}
+				svc.CapacityProviderStrategy = append(svc.CapacityProviderStrategy, item)
+			}
+		}
+	}
+
 	if deps, err := ExtractStringSlice(v, "dependsOn"); err == nil {
 		svc.DependsOn = deps
 	}
@@ -541,6 +595,30 @@ func parseService(name string, v cue.Value) (Service, error) {
 		}
 		if pip, err := ExtractString(netConfig, "assignPublicIp"); err == nil {
 			svc.NetworkConfiguration.AssignPublicIp = pip
+		}
+	}
+
+	// Parse service registries
+	serviceRegistries := v.LookupPath(cue.ParsePath("serviceRegistries"))
+	if serviceRegistries.Exists() {
+		iter, err := serviceRegistries.List()
+		if err == nil {
+			for iter.Next() {
+				reg := ServiceRegistry{}
+				if arn, err := ExtractString(iter.Value(), "registryArn"); err == nil {
+					reg.RegistryArn = arn
+				}
+				if name, err := ExtractString(iter.Value(), "containerName"); err == nil {
+					reg.ContainerName = name
+				}
+				if port, err := ExtractInt(iter.Value(), "containerPort"); err == nil {
+					reg.ContainerPort = int(port)
+				}
+				if port, err := ExtractInt(iter.Value(), "port"); err == nil {
+					reg.Port = int(port)
+				}
+				svc.ServiceRegistries = append(svc.ServiceRegistries, reg)
+			}
 		}
 	}
 

@@ -40,6 +40,7 @@ type ServiceResource struct {
 	Action  ServiceAction
 
 	TaskDefinitionArn string
+	ClusterArn        string
 
 	// Recreate tracking - fields that changed and force recreation
 	RecreateReasons []string
@@ -54,9 +55,57 @@ type CurrentAutoScalingState struct {
 	Policies []awsclient.ScalingPolicyInfo
 }
 
-func (r *ServiceResource) ToCreateInput() (*ecs.CreateServiceInput, error) {
+// Validate validates the service resource configuration
+func (r *ServiceResource) Validate() error {
 	if r.Desired == nil {
-		return nil, fmt.Errorf("no desired state for service %s", r.Name)
+		return fmt.Errorf("no desired state for service %s", r.Name)
+	}
+
+	svc := r.Desired
+
+	if svc.Name == "" {
+		return fmt.Errorf("service name is required")
+	}
+	if svc.Cluster == "" {
+		return fmt.Errorf("service %s: cluster is required", svc.Name)
+	}
+	if r.TaskDefinitionArn == "" && svc.TaskDefinition == "" {
+		return fmt.Errorf("service %s: taskDefinition is required", svc.Name)
+	}
+
+	// Validate network configuration
+	if svc.NetworkConfiguration != nil {
+		if len(svc.NetworkConfiguration.Subnets) == 0 {
+			return fmt.Errorf("service %s: networkConfiguration.subnets is required", svc.Name)
+		}
+	}
+
+	// Validate load balancers
+	for i, lb := range svc.LoadBalancers {
+		if lb.TargetGroupArn == "" {
+			return fmt.Errorf("service %s: loadBalancers[%d].targetGroupArn is required", svc.Name, i)
+		}
+		if lb.ContainerName == "" {
+			return fmt.Errorf("service %s: loadBalancers[%d].containerName is required", svc.Name, i)
+		}
+		if lb.ContainerPort <= 0 {
+			return fmt.Errorf("service %s: loadBalancers[%d].containerPort is required", svc.Name, i)
+		}
+	}
+
+	// Validate service registries
+	for i, reg := range svc.ServiceRegistries {
+		if reg.RegistryArn == "" {
+			return fmt.Errorf("service %s: serviceRegistries[%d].registryArn is required", svc.Name, i)
+		}
+	}
+
+	return nil
+}
+
+func (r *ServiceResource) ToCreateInput() (*ecs.CreateServiceInput, error) {
+	if err := r.Validate(); err != nil {
+		return nil, err
 	}
 
 	svc := r.Desired
@@ -68,7 +117,18 @@ func (r *ServiceResource) ToCreateInput() (*ecs.CreateServiceInput, error) {
 		DesiredCount:   aws.Int32(int32(svc.DesiredCount)),
 	}
 
-	if svc.LaunchType != "" {
+	if len(svc.CapacityProviderStrategy) > 0 {
+		for _, cp := range svc.CapacityProviderStrategy {
+			item := types.CapacityProviderStrategyItem{
+				CapacityProvider: aws.String(cp.CapacityProvider),
+				Weight:           int32(cp.Weight),
+			}
+			if cp.Base > 0 {
+				item.Base = int32(cp.Base)
+			}
+			input.CapacityProviderStrategy = append(input.CapacityProviderStrategy, item)
+		}
+	} else if svc.LaunchType != "" {
 		input.LaunchType = types.LaunchType(svc.LaunchType)
 	}
 
@@ -119,8 +179,8 @@ func (r *ServiceResource) ToCreateInput() (*ecs.CreateServiceInput, error) {
 }
 
 func (r *ServiceResource) ToUpdateInput() (*ecs.UpdateServiceInput, error) {
-	if r.Desired == nil {
-		return nil, fmt.Errorf("no desired state for service %s", r.Name)
+	if err := r.Validate(); err != nil {
+		return nil, err
 	}
 
 	svc := r.Desired
@@ -130,6 +190,20 @@ func (r *ServiceResource) ToUpdateInput() (*ecs.UpdateServiceInput, error) {
 		Cluster:        aws.String(svc.Cluster),
 		TaskDefinition: aws.String(r.TaskDefinitionArn),
 		DesiredCount:   aws.Int32(int32(svc.DesiredCount)),
+	}
+
+	// Capacity provider strategy can be updated (unlike launchType)
+	if len(svc.CapacityProviderStrategy) > 0 {
+		for _, cp := range svc.CapacityProviderStrategy {
+			item := types.CapacityProviderStrategyItem{
+				CapacityProvider: aws.String(cp.CapacityProvider),
+				Weight:           int32(cp.Weight),
+			}
+			if cp.Base > 0 {
+				item.Base = int32(cp.Base)
+			}
+			input.CapacityProviderStrategy = append(input.CapacityProviderStrategy, item)
+		}
 	}
 
 	if svc.PlatformVersion != "" {
@@ -427,6 +501,12 @@ func (resource *ServiceResource) determineAutoScalingAction() {
 	}
 
 	resource.AutoScalingAction = AutoScalingActionNoop
+}
+
+// RecalculateAction refreshes the service and autoscaling actions after mutating desired state.
+func (resource *ServiceResource) RecalculateAction() {
+	resource.determineAction()
+	resource.determineAutoScalingAction()
 }
 
 func (resource *ServiceResource) hasAutoScalingChanges() bool {

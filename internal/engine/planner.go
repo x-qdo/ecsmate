@@ -338,6 +338,7 @@ type ServiceView struct {
 	LaunchType           string                `json:"launchType,omitempty"`
 	NetworkConfiguration *NetworkConfigView    `json:"networkConfiguration,omitempty"`
 	LoadBalancers        []LoadBalancerView    `json:"loadBalancers,omitempty"`
+	ServiceRegistries    []ServiceRegistryView `json:"serviceRegistries,omitempty"`
 	Deployment           *DeploymentConfigView `json:"deployment,omitempty"`
 }
 
@@ -351,6 +352,13 @@ type LoadBalancerView struct {
 	TargetGroupArn string `json:"targetGroupArn"`
 	ContainerName  string `json:"containerName"`
 	ContainerPort  int    `json:"containerPort"`
+}
+
+type ServiceRegistryView struct {
+	RegistryArn   string `json:"registryArn"`
+	ContainerName string `json:"containerName,omitempty"`
+	ContainerPort int    `json:"containerPort,omitempty"`
+	Port          int    `json:"port,omitempty"`
 }
 
 type DeploymentConfigView struct {
@@ -432,6 +440,23 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 				lbView.ContainerPort = int(*lb.ContainerPort)
 			}
 			view.LoadBalancers = append(view.LoadBalancers, lbView)
+		}
+
+		for _, reg := range svc.Current.ServiceRegistries {
+			regView := ServiceRegistryView{}
+			if reg.RegistryArn != nil {
+				regView.RegistryArn = *reg.RegistryArn
+			}
+			if reg.ContainerName != nil {
+				regView.ContainerName = *reg.ContainerName
+			}
+			if reg.ContainerPort != nil {
+				regView.ContainerPort = int(*reg.ContainerPort)
+			}
+			if reg.Port != nil {
+				regView.Port = int(*reg.Port)
+			}
+			view.ServiceRegistries = append(view.ServiceRegistries, regView)
 		}
 
 		if svc.Current.DeploymentConfiguration != nil {

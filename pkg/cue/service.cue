@@ -6,6 +6,7 @@ package schema
 	desiredCount:   int & >=0
 
 	launchType?:          "EC2" | "FARGATE" | "EXTERNAL"
+	capacityProviderStrategy?: [...#CapacityProviderStrategyItem]
 	platformVersion?:     string
 	enableExecuteCommand?: bool
 
@@ -17,6 +18,12 @@ package schema
 	dependsOn?: [...string]
 
 	autoScaling?: #AutoScaling
+}
+
+#CapacityProviderStrategyItem: {
+	capacityProvider: string
+	weight:           int & >=0 & <=1000
+	base?:            int & >=0 & <=100000
 }
 
 #NetworkConfiguration: {

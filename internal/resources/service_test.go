@@ -818,3 +818,145 @@ func TestServiceResource_ToCreateInput_WithServiceRegistries_PortOnly(t *testing
 	}
 }
 
+func TestServiceResource_Validate_Success(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "web-service",
+			Cluster: "test-cluster",
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	err := resource.Validate()
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+}
+
+func TestServiceResource_Validate_MissingName(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "",
+			Cluster: "test-cluster",
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	err := resource.Validate()
+	if err == nil {
+		t.Error("expected error for missing name")
+	}
+}
+
+func TestServiceResource_Validate_MissingCluster(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "web-service",
+			Cluster: "",
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	err := resource.Validate()
+	if err == nil {
+		t.Error("expected error for missing cluster")
+	}
+}
+
+func TestServiceResource_Validate_MissingTaskDefinition(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:           "web-service",
+			Cluster:        "test-cluster",
+			TaskDefinition: "",
+		},
+		TaskDefinitionArn: "",
+	}
+
+	err := resource.Validate()
+	if err == nil {
+		t.Error("expected error for missing task definition")
+	}
+}
+
+func TestServiceResource_Validate_EmptySubnets(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "web-service",
+			Cluster: "test-cluster",
+			NetworkConfiguration: &config.NetworkConfiguration{
+				Subnets: []string{},
+			},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	err := resource.Validate()
+	if err == nil {
+		t.Error("expected error for empty subnets")
+	}
+}
+
+func TestServiceResource_Validate_InvalidLoadBalancer(t *testing.T) {
+	tests := []struct {
+		name string
+		lb   config.LoadBalancer
+	}{
+		{
+			name: "missing targetGroupArn",
+			lb:   config.LoadBalancer{ContainerName: "app", ContainerPort: 8080},
+		},
+		{
+			name: "missing containerName",
+			lb:   config.LoadBalancer{TargetGroupArn: "arn:...", ContainerPort: 8080},
+		},
+		{
+			name: "missing containerPort",
+			lb:   config.LoadBalancer{TargetGroupArn: "arn:...", ContainerName: "app"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resource := &ServiceResource{
+				Name: "web",
+				Desired: &config.Service{
+					Name:          "web-service",
+					Cluster:       "test-cluster",
+					LoadBalancers: []config.LoadBalancer{tt.lb},
+				},
+				TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+			}
+
+			err := resource.Validate()
+			if err == nil {
+				t.Error("expected error for invalid load balancer")
+			}
+		})
+	}
+}
+
+func TestServiceResource_Validate_InvalidServiceRegistry(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "web-service",
+			Cluster: "test-cluster",
+			ServiceRegistries: []config.ServiceRegistry{
+				{RegistryArn: ""},
+			},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	err := resource.Validate()
+	if err == nil {
+		t.Error("expected error for invalid service registry")
+	}
+}
+
