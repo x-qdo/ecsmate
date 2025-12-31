@@ -269,7 +269,7 @@ func TestBuildServiceView(t *testing.T) {
 		},
 	}
 
-	view := buildServiceView(svc)
+	view := buildServiceView(svc, nil, nil)
 
 	if view.Cluster != "production-cluster" {
 		t.Errorf("expected cluster 'production-cluster', got '%s'", view.Cluster)
@@ -297,6 +297,69 @@ func TestBuildServiceView(t *testing.T) {
 
 	if !view.Deployment.CircuitBreakerEnable {
 		t.Error("expected circuit breaker to be enabled")
+	}
+}
+
+func TestBuildServiceView_IngressPlaceholder(t *testing.T) {
+	svc := &resources.ServiceResource{
+		Name:              "telemetry",
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/telemetry:1",
+		Desired: &config.Service{
+			Name:         "telemetry",
+			Cluster:      "stage-cluster",
+			DesiredCount: 1,
+		},
+	}
+
+	ingress := &config.Ingress{
+		Rules: []config.IngressRule{
+			{
+				Service: &config.IngressServiceBackend{
+					Name:          "telemetry",
+					ContainerName: "app",
+					ContainerPort: 8080,
+				},
+			},
+		},
+	}
+
+	view := buildServiceView(svc, ingress, nil)
+
+	if len(view.LoadBalancers) != 1 {
+		t.Fatalf("expected 1 load balancer, got %d", len(view.LoadBalancers))
+	}
+	if view.LoadBalancers[0].TargetGroupArn != pendingTargetGroupArn {
+		t.Errorf("expected pending target group placeholder, got %q", view.LoadBalancers[0].TargetGroupArn)
+	}
+}
+
+func TestBuildServiceView_TaskDefinitionPlaceholder(t *testing.T) {
+	taskDefs := map[string]*resources.TaskDefResource{
+		"web": {
+			Name:   "web",
+			Action: resources.TaskDefActionUpdate,
+			Desired: &config.TaskDefinition{
+				Family: "cal-web",
+				Type:   "managed",
+			},
+		},
+	}
+
+	svc := &resources.ServiceResource{
+		Name:              "web",
+		TaskDefinitionArn: "arn:aws:ecs:eu-west-1:570129572534:task-definition/cal-web:3",
+		Desired: &config.Service{
+			Name:           "web",
+			Cluster:        "stage-cluster",
+			TaskDefinition: "web",
+		},
+	}
+
+	view := buildServiceView(svc, nil, taskDefs)
+
+	expected := "arn:aws:ecs:eu-west-1:570129572534:task-definition/cal-web:(new revision after apply)"
+	if view.TaskDefinition != expected {
+		t.Errorf("expected taskDefinition %q, got %q", expected, view.TaskDefinition)
 	}
 }
 

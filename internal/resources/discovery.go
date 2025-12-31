@@ -3,6 +3,9 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	awsclient "github.com/qdo/ecsmate/internal/aws"
 	"github.com/qdo/ecsmate/internal/config"
@@ -14,21 +17,27 @@ type DesiredState struct {
 	TaskDefs       map[string]*TaskDefResource
 	Services       map[string]*ServiceResource
 	ScheduledTasks map[string]*ScheduledTaskResource
+	TargetGroups   map[string]*TargetGroupResource
+	ListenerRules  []*ListenerRuleResource
 }
 
 type ResourceBuilder struct {
-	ecsClient         *awsclient.ECSClient
-	schedulerClient   *awsclient.SchedulerClient
-	autoScalingClient *awsclient.AutoScalingClient
-	taskDefManager    *TaskDefManager
-	serviceManager    *ServiceManager
-	scheduledManager  *ScheduledTaskManager
+	ecsClient          *awsclient.ECSClient
+	schedulerClient    *awsclient.SchedulerClient
+	autoScalingClient  *awsclient.AutoScalingClient
+	elbv2Client        *awsclient.ELBV2Client
+	taskDefManager     *TaskDefManager
+	serviceManager     *ServiceManager
+	scheduledManager   *ScheduledTaskManager
+	targetGroupManager *TargetGroupManager
+	listenerRuleMgr    *ListenerRuleManager
 }
 
 type ResourceBuilderConfig struct {
-	ECSClient         *awsclient.ECSClient
-	SchedulerClient   *awsclient.SchedulerClient
-	AutoScalingClient *awsclient.AutoScalingClient
+	ECSClient          *awsclient.ECSClient
+	SchedulerClient    *awsclient.SchedulerClient
+	AutoScalingClient  *awsclient.AutoScalingClient
+	ELBV2Client        *awsclient.ELBV2Client
 	SchedulerGroupName string
 }
 
@@ -40,13 +49,23 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 		serviceManager = NewServiceManager(cfg.ECSClient)
 	}
 
+	var targetGroupManager *TargetGroupManager
+	var listenerRuleMgr *ListenerRuleManager
+	if cfg.ELBV2Client != nil {
+		targetGroupManager = NewTargetGroupManager(cfg.ELBV2Client)
+		listenerRuleMgr = NewListenerRuleManager(cfg.ELBV2Client)
+	}
+
 	return &ResourceBuilder{
-		ecsClient:         cfg.ECSClient,
-		schedulerClient:   cfg.SchedulerClient,
-		autoScalingClient: cfg.AutoScalingClient,
-		taskDefManager:    NewTaskDefManager(cfg.ECSClient),
-		serviceManager:    serviceManager,
-		scheduledManager:  NewScheduledTaskManager(cfg.SchedulerClient, cfg.SchedulerGroupName),
+		ecsClient:          cfg.ECSClient,
+		schedulerClient:    cfg.SchedulerClient,
+		autoScalingClient:  cfg.AutoScalingClient,
+		elbv2Client:        cfg.ELBV2Client,
+		taskDefManager:     NewTaskDefManager(cfg.ECSClient),
+		serviceManager:     serviceManager,
+		scheduledManager:   NewScheduledTaskManager(cfg.SchedulerClient, cfg.SchedulerGroupName),
+		targetGroupManager: targetGroupManager,
+		listenerRuleMgr:    listenerRuleMgr,
 	}
 }
 
@@ -57,6 +76,8 @@ func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *confi
 		TaskDefs:       make(map[string]*TaskDefResource),
 		Services:       make(map[string]*ServiceResource),
 		ScheduledTasks: make(map[string]*ScheduledTaskResource),
+		TargetGroups:   make(map[string]*TargetGroupResource),
+		ListenerRules:  make([]*ListenerRuleResource, 0),
 	}
 
 	log.Info("building desired state from manifest", "name", manifest.Name)
@@ -71,6 +92,10 @@ func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *confi
 
 	if err := b.buildScheduledTasks(ctx, manifest, state, schedulerRoleArn); err != nil {
 		return nil, fmt.Errorf("failed to build scheduled tasks: %w", err)
+	}
+
+	if err := b.buildIngress(ctx, manifest, state); err != nil {
+		return nil, fmt.Errorf("failed to build ingress: %w", err)
 	}
 
 	return state, nil
@@ -97,8 +122,13 @@ func (b *ResourceBuilder) buildTaskDefs(ctx context.Context, manifest *config.Ma
 }
 
 func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Manifest, state *DesiredState) error {
+	clusterArns := make(map[string]string)
+
 	for name, svc := range manifest.Services {
 		log.Debug("building service resource", "name", name)
+
+		ecsName := resolveServiceName(manifest.Name, name)
+		clusterArn := resolveClusterArn(ctx, b.ecsClient, svc.Cluster, clusterArns)
 
 		taskDefName := svc.TaskDefinition
 		taskDefResource, ok := state.TaskDefs[taskDefName]
@@ -112,10 +142,12 @@ func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Ma
 		}
 
 		svcCopy := svc
+		svcCopy.Name = ecsName
 		resource, err := b.serviceManager.BuildResource(ctx, name, &svcCopy, taskDefArn)
 		if err != nil {
 			return fmt.Errorf("failed to build service %s: %w", name, err)
 		}
+		resource.ClusterArn = clusterArn
 
 		state.Services[name] = resource
 		log.Debug("built service resource",
@@ -125,6 +157,44 @@ func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Ma
 	}
 
 	return nil
+}
+
+func resolveServiceName(namespace, service string) string {
+	if namespace == "" || service == "" {
+		return service
+	}
+
+	prefix := namespace + "-"
+	if strings.HasPrefix(service, prefix) {
+		return service
+	}
+
+	return prefix + service
+}
+
+func resolveClusterArn(ctx context.Context, ecsClient *awsclient.ECSClient, cluster string, cache map[string]string) string {
+	if cluster == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(cluster, "arn:") {
+		cache[cluster] = cluster
+		return cluster
+	}
+
+	if arn, ok := cache[cluster]; ok {
+		return arn
+	}
+
+	arn, err := ecsClient.DescribeClusterArn(ctx, cluster)
+	if err != nil {
+		log.Warn("failed to resolve cluster ARN", "cluster", cluster, "error", err)
+		cache[cluster] = ""
+		return ""
+	}
+
+	cache[cluster] = arn
+	return arn
 }
 
 func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *config.Manifest, state *DesiredState, roleArn string) error {
@@ -160,6 +230,68 @@ func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *con
 			"name", name,
 			"action", resource.Action)
 	}
+
+	return nil
+}
+
+func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Manifest, state *DesiredState) error {
+	if manifest.Ingress == nil {
+		return nil
+	}
+
+	if b.targetGroupManager == nil || b.listenerRuleMgr == nil {
+		log.Warn("ELBV2 client not initialized, skipping ingress resources")
+		return nil
+	}
+
+	vpcID := manifest.Ingress.VpcID
+	listenerArn := manifest.Ingress.ListenerArn
+
+	existingRules := []types.Rule{}
+	if b.listenerRuleMgr != nil {
+		rules, err := b.listenerRuleMgr.DescribeExistingRules(ctx, listenerArn)
+		if err != nil {
+			log.Warn("failed to describe listener rules", "listener", listenerArn, "error", err)
+		} else {
+			existingRules = rules
+		}
+	}
+
+	existingRuleMatches := matchExistingListenerRules(manifest.Ingress.Rules, existingRules)
+	existingTargetGroupArns := make(map[int]string)
+	for idx, rule := range existingRuleMatches {
+		if rule == nil {
+			continue
+		}
+		if arn := extractTargetGroupArn(rule); arn != "" {
+			existingTargetGroupArns[idx] = arn
+		}
+	}
+
+	// Build target groups for rules with service backends
+	tgSpecs := ExtractTargetGroups(manifest, manifest.Name)
+	targetGroupArns := make(map[int]string)
+
+	for key, spec := range tgSpecs {
+		log.Debug("building target group resource", "name", spec.Name)
+
+		existingArn := existingTargetGroupArns[spec.RuleIndex]
+		resource, err := b.targetGroupManager.BuildResourceWithExisting(ctx, key, spec, vpcID, existingArn)
+		if err != nil {
+			return fmt.Errorf("failed to build target group %s: %w", spec.Name, err)
+		}
+
+		state.TargetGroups[key] = resource
+
+		if resource.Arn != "" {
+			targetGroupArns[spec.RuleIndex] = resource.Arn
+		} else if existingArn != "" {
+			targetGroupArns[spec.RuleIndex] = existingArn
+		}
+	}
+
+	// Build listener rules
+	state.ListenerRules = b.listenerRuleMgr.BuildResourcesWithExisting(listenerArn, manifest.Ingress.Rules, targetGroupArns, existingRules)
 
 	return nil
 }

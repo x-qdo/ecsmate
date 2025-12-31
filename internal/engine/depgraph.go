@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/qdo/ecsmate/internal/config"
 	"github.com/qdo/ecsmate/internal/log"
 	"github.com/qdo/ecsmate/internal/resources"
 )
@@ -116,6 +117,7 @@ func BuildServiceGraph(state *resources.DesiredState) (*DependencyGraph, error) 
 }
 
 type ExecutionPlan struct {
+	Manifest       *config.Manifest
 	TaskDefs       []*resources.TaskDefResource
 	ServiceLevels  [][]string
 	ScheduledTasks []*resources.ScheduledTaskResource
@@ -124,6 +126,7 @@ type ExecutionPlan struct {
 
 func BuildExecutionPlan(state *resources.DesiredState) (*ExecutionPlan, error) {
 	plan := &ExecutionPlan{
+		Manifest:       state.Manifest,
 		TaskDefs:       make([]*resources.TaskDefResource, 0),
 		ScheduledTasks: make([]*resources.ScheduledTaskResource, 0),
 	}

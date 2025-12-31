@@ -119,6 +119,43 @@ func TestBuildExecutionPlan_WithTaskDefs(t *testing.T) {
 	}
 }
 
+func TestResolveIngressTargetGroups_AddsLoadBalancer(t *testing.T) {
+	services := map[string]config.Service{
+		"api": {
+			Name: "api",
+		},
+	}
+	ingress := &config.Ingress{
+		Rules: []config.IngressRule{
+			{
+				Service: &config.IngressServiceBackend{
+					Name:          "api",
+					ContainerName: "app",
+					ContainerPort: 8080,
+				},
+			},
+		},
+	}
+	targetGroupArns := map[int]string{0: "arn:aws:elasticloadbalancing:targetgroup/api/123"}
+
+	ResolveIngressTargetGroups(services, ingress, targetGroupArns)
+
+	svc := services["api"]
+	if len(svc.LoadBalancers) != 1 {
+		t.Fatalf("expected 1 load balancer, got %d", len(svc.LoadBalancers))
+	}
+	lb := svc.LoadBalancers[0]
+	if lb.TargetGroupArn != targetGroupArns[0] {
+		t.Errorf("expected target group ARN %q, got %q", targetGroupArns[0], lb.TargetGroupArn)
+	}
+	if lb.ContainerName != "app" {
+		t.Errorf("expected container name 'app', got %q", lb.ContainerName)
+	}
+	if lb.ContainerPort != 8080 {
+		t.Errorf("expected container port 8080, got %d", lb.ContainerPort)
+	}
+}
+
 func TestBuildExecutionPlan_WithServicesNoDeps(t *testing.T) {
 	state := &resources.DesiredState{
 		TaskDefs: make(map[string]*resources.TaskDefResource),

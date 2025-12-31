@@ -14,6 +14,71 @@ type Manifest struct {
 	TaskDefinitions map[string]TaskDefinition
 	Services        map[string]Service
 	ScheduledTasks  map[string]ScheduledTask
+	Ingress         *Ingress
+}
+
+type LogGroup struct {
+	Name            string
+	RetentionInDays int
+	KMSKeyID        string
+	Tags            map[string]string
+}
+
+type Ingress struct {
+	ListenerArn string
+	VpcID       string
+	Rules       []IngressRule
+}
+
+type IngressRule struct {
+	Priority int
+
+	// Match conditions
+	Host  string
+	Hosts []string
+	Paths []string
+
+	// Backend (one of these)
+	Service       *IngressServiceBackend
+	Redirect      *IngressRedirect
+	FixedResponse *IngressFixedResponse
+
+	// Target group settings (when using service backend)
+	HealthCheck         *TargetGroupHealthCheck
+	DeregistrationDelay int
+	Tags                map[string]string
+}
+
+type IngressServiceBackend struct {
+	Name          string // service name in manifest
+	ContainerName string
+	ContainerPort int
+}
+
+type IngressRedirect struct {
+	StatusCode string
+	Protocol   string
+	Host       string
+	Port       string
+	Path       string
+	Query      string
+}
+
+type IngressFixedResponse struct {
+	StatusCode  string
+	ContentType string
+	MessageBody string
+}
+
+type TargetGroupHealthCheck struct {
+	Path               string
+	Protocol           string
+	Port               string
+	HealthyThreshold   int
+	UnhealthyThreshold int
+	Timeout            int
+	Interval           int
+	Matcher            string
 }
 
 type TaskDefinition struct {
@@ -154,6 +219,12 @@ type LogConfiguration struct {
 	LogDriver     string
 	Options       map[string]string
 	SecretOptions []Secret
+
+	// Log group management (only for awslogs driver)
+	CreateLogGroup  bool
+	RetentionInDays int
+	KMSKeyID        string
+	LogGroupTags    map[string]string
 }
 
 type ContainerDependency struct {
@@ -346,11 +417,22 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 		}
 	}
 
+	// Parse ingress
+	ingress := value.LookupPath(cue.ParsePath("ingress"))
+	if ingress.Exists() {
+		ing, err := parseIngress(ingress)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse ingress: %w", err)
+		}
+		manifest.Ingress = ing
+	}
+
 	log.Info("parsed manifest",
 		"name", manifest.Name,
 		"taskDefinitions", len(manifest.TaskDefinitions),
 		"services", len(manifest.Services),
-		"scheduledTasks", len(manifest.ScheduledTasks))
+		"scheduledTasks", len(manifest.ScheduledTasks),
+		"hasIngress", manifest.Ingress != nil)
 
 	return manifest, nil
 }
@@ -519,7 +601,8 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	logConfig := v.LookupPath(cue.ParsePath("logConfiguration"))
 	if logConfig.Exists() {
 		cd.LogConfiguration = &LogConfiguration{
-			Options: make(map[string]string),
+			Options:      make(map[string]string),
+			LogGroupTags: make(map[string]string),
 		}
 		if driver, err := ExtractString(logConfig, "logDriver"); err == nil {
 			cd.LogConfiguration.LogDriver = driver
@@ -533,6 +616,29 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 						key := iter.Selector().String()
 						key = strings.Trim(key, "\"")
 						cd.LogConfiguration.Options[key] = val
+					}
+				}
+			}
+		}
+		// Log group management fields
+		if create, err := ExtractBool(logConfig, "createLogGroup"); err == nil {
+			cd.LogConfiguration.CreateLogGroup = create
+		}
+		if retention, err := ExtractInt(logConfig, "retentionInDays"); err == nil {
+			cd.LogConfiguration.RetentionInDays = int(retention)
+		}
+		if kmsKey, err := ExtractString(logConfig, "kmsKeyId"); err == nil {
+			cd.LogConfiguration.KMSKeyID = kmsKey
+		}
+		logTags := logConfig.LookupPath(cue.ParsePath("logGroupTags"))
+		if logTags.Exists() {
+			iter, err := logTags.Fields()
+			if err == nil {
+				for iter.Next() {
+					if val, err := iter.Value().String(); err == nil {
+						key := iter.Selector().String()
+						key = strings.Trim(key, "\"")
+						cd.LogConfiguration.LogGroupTags[key] = val
 					}
 				}
 			}
@@ -727,4 +833,171 @@ func parseScheduledTask(name string, v cue.Value) (ScheduledTask, error) {
 	}
 
 	return task, nil
+}
+
+func parseIngress(v cue.Value) (*Ingress, error) {
+	ing := &Ingress{}
+
+	if arn, err := ExtractString(v, "listenerArn"); err == nil {
+		ing.ListenerArn = arn
+	}
+	if vpcID, err := ExtractString(v, "vpcId"); err == nil {
+		ing.VpcID = vpcID
+	}
+
+	// Parse rules
+	rules := v.LookupPath(cue.ParsePath("rules"))
+	if rules.Exists() {
+		iter, err := rules.List()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list rules: %w", err)
+		}
+
+		for iter.Next() {
+			rule, err := parseIngressRule(iter.Value())
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse ingress rule: %w", err)
+			}
+			ing.Rules = append(ing.Rules, rule)
+		}
+	}
+
+	return ing, nil
+}
+
+func parseIngressRule(v cue.Value) (IngressRule, error) {
+	rule := IngressRule{
+		Tags: make(map[string]string),
+	}
+
+	if priority, err := ExtractInt(v, "priority"); err == nil {
+		rule.Priority = int(priority)
+	}
+
+	// Parse match conditions
+	if host, err := ExtractString(v, "host"); err == nil {
+		rule.Host = host
+	}
+	if hosts, err := ExtractStringSlice(v, "hosts"); err == nil {
+		rule.Hosts = hosts
+	}
+	if paths, err := ExtractStringSlice(v, "paths"); err == nil {
+		rule.Paths = paths
+	}
+
+	// Parse service backend
+	svc := v.LookupPath(cue.ParsePath("service"))
+	if svc.Exists() {
+		rule.Service = &IngressServiceBackend{}
+		if name, err := ExtractString(svc, "name"); err == nil {
+			rule.Service.Name = name
+		}
+		if containerName, err := ExtractString(svc, "containerName"); err == nil {
+			rule.Service.ContainerName = containerName
+		}
+		if containerPort, err := ExtractInt(svc, "containerPort"); err == nil {
+			rule.Service.ContainerPort = int(containerPort)
+		}
+	}
+
+	// Parse redirect backend
+	redirect := v.LookupPath(cue.ParsePath("redirect"))
+	if redirect.Exists() {
+		rule.Redirect = &IngressRedirect{
+			StatusCode: "HTTP_301",
+		}
+		if sc, err := ExtractString(redirect, "statusCode"); err == nil {
+			rule.Redirect.StatusCode = sc
+		}
+		if protocol, err := ExtractString(redirect, "protocol"); err == nil {
+			rule.Redirect.Protocol = protocol
+		}
+		if host, err := ExtractString(redirect, "host"); err == nil {
+			rule.Redirect.Host = host
+		}
+		if port, err := ExtractString(redirect, "port"); err == nil {
+			rule.Redirect.Port = port
+		}
+		if path, err := ExtractString(redirect, "path"); err == nil {
+			rule.Redirect.Path = path
+		}
+		if query, err := ExtractString(redirect, "query"); err == nil {
+			rule.Redirect.Query = query
+		}
+	}
+
+	// Parse fixed-response backend
+	fixedResp := v.LookupPath(cue.ParsePath("fixedResponse"))
+	if fixedResp.Exists() {
+		rule.FixedResponse = &IngressFixedResponse{}
+		if sc, err := ExtractString(fixedResp, "statusCode"); err == nil {
+			rule.FixedResponse.StatusCode = sc
+		}
+		if ct, err := ExtractString(fixedResp, "contentType"); err == nil {
+			rule.FixedResponse.ContentType = ct
+		}
+		if mb, err := ExtractString(fixedResp, "messageBody"); err == nil {
+			rule.FixedResponse.MessageBody = mb
+		}
+	}
+
+	// Parse health check (for service backends)
+	hc := v.LookupPath(cue.ParsePath("healthCheck"))
+	if hc.Exists() {
+		rule.HealthCheck = &TargetGroupHealthCheck{
+			Path:               "/",
+			Protocol:           "HTTP",
+			Port:               "traffic-port",
+			HealthyThreshold:   5,
+			UnhealthyThreshold: 2,
+			Timeout:            5,
+			Interval:           30,
+			Matcher:            "200",
+		}
+		if path, err := ExtractString(hc, "path"); err == nil {
+			rule.HealthCheck.Path = path
+		}
+		if protocol, err := ExtractString(hc, "protocol"); err == nil {
+			rule.HealthCheck.Protocol = protocol
+		}
+		if port, err := ExtractString(hc, "port"); err == nil {
+			rule.HealthCheck.Port = port
+		}
+		if ht, err := ExtractInt(hc, "healthyThreshold"); err == nil {
+			rule.HealthCheck.HealthyThreshold = int(ht)
+		}
+		if ut, err := ExtractInt(hc, "unhealthyThreshold"); err == nil {
+			rule.HealthCheck.UnhealthyThreshold = int(ut)
+		}
+		if timeout, err := ExtractInt(hc, "timeout"); err == nil {
+			rule.HealthCheck.Timeout = int(timeout)
+		}
+		if interval, err := ExtractInt(hc, "interval"); err == nil {
+			rule.HealthCheck.Interval = int(interval)
+		}
+		if matcher, err := ExtractString(hc, "matcher"); err == nil {
+			rule.HealthCheck.Matcher = matcher
+		}
+	}
+
+	if deregDelay, err := ExtractInt(v, "deregistrationDelay"); err == nil {
+		rule.DeregistrationDelay = int(deregDelay)
+	}
+
+	// Parse tags
+	tags := v.LookupPath(cue.ParsePath("tags"))
+	if tags.Exists() {
+		iter, err := tags.Fields()
+		if err == nil {
+			for iter.Next() {
+				if val, err := iter.Value().String(); err == nil {
+					key := iter.Selector().String()
+					key = strings.Trim(key, "\"")
+					rule.Tags[key] = val
+				}
+			}
+		}
+	}
+
+	return rule, nil
 }

@@ -79,6 +79,23 @@ func (c *ECSClient) DescribeServices(ctx context.Context, services []string) ([]
 	return out.Services, nil
 }
 
+func (c *ECSClient) DescribeClusterArn(ctx context.Context, cluster string) (string, error) {
+	log.Debug("describing cluster", "cluster", cluster)
+
+	out, err := c.client.DescribeClusters(ctx, &ecs.DescribeClustersInput{
+		Clusters: []string{cluster},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe cluster %s: %w", cluster, err)
+	}
+
+	if len(out.Clusters) == 0 {
+		return "", fmt.Errorf("cluster %s not found", cluster)
+	}
+
+	return aws.ToString(out.Clusters[0].ClusterArn), nil
+}
+
 func (c *ECSClient) UpdateService(ctx context.Context, input *ecs.UpdateServiceInput) (*types.Service, error) {
 	if input.Cluster == nil {
 		input.Cluster = aws.String(c.cluster)

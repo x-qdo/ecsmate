@@ -60,6 +60,10 @@ func collectSSMReferences(manifest *Manifest) []string {
 		collectFromScheduledTask(&st, refs)
 	}
 
+	if manifest.Ingress != nil {
+		collectFromIngress(manifest.Ingress, refs)
+	}
+
 	result := make([]string, 0, len(refs))
 	for ref := range refs {
 		result = append(result, ref)
@@ -118,6 +122,9 @@ func collectFromService(svc *Service, refs map[string]struct{}) {
 	for _, lb := range svc.LoadBalancers {
 		collectFromString(lb.TargetGroupArn, refs)
 	}
+	for _, reg := range svc.ServiceRegistries {
+		collectFromString(reg.RegistryArn, refs)
+	}
 }
 
 func collectFromScheduledTask(st *ScheduledTask, refs map[string]struct{}) {
@@ -134,6 +141,16 @@ func collectFromScheduledTask(st *ScheduledTask, refs map[string]struct{}) {
 		collectFromString(st.Overrides.TaskRoleArn, refs)
 		collectFromString(st.Overrides.ExecutionRoleArn, refs)
 	}
+}
+
+func collectFromIngress(ingress *Ingress, refs map[string]struct{}) {
+	collectFromString(ingress.ListenerArn, refs)
+	collectFromString(ingress.VpcID, refs)
+}
+
+func replaceInIngress(ingress *Ingress, values map[string]string) {
+	ingress.ListenerArn = replaceInString(ingress.ListenerArn, values)
+	ingress.VpcID = replaceInString(ingress.VpcID, values)
 }
 
 func collectFromString(s string, refs map[string]struct{}) {
@@ -160,6 +177,10 @@ func replaceSSMReferences(manifest *Manifest, values map[string]string) {
 	for name, st := range manifest.ScheduledTasks {
 		replaceInScheduledTask(&st, values)
 		manifest.ScheduledTasks[name] = st
+	}
+
+	if manifest.Ingress != nil {
+		replaceInIngress(manifest.Ingress, values)
 	}
 }
 
