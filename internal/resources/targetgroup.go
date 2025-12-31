@@ -15,10 +15,11 @@ import (
 type TargetGroupAction string
 
 const (
-	TargetGroupActionCreate TargetGroupAction = "CREATE"
-	TargetGroupActionUpdate TargetGroupAction = "UPDATE"
-	TargetGroupActionDelete TargetGroupAction = "DELETE"
-	TargetGroupActionNoop   TargetGroupAction = "NOOP"
+	TargetGroupActionCreate   TargetGroupAction = "CREATE"
+	TargetGroupActionUpdate   TargetGroupAction = "UPDATE"
+	TargetGroupActionRecreate TargetGroupAction = "RECREATE"
+	TargetGroupActionDelete   TargetGroupAction = "DELETE"
+	TargetGroupActionNoop     TargetGroupAction = "NOOP"
 )
 
 // TargetGroupSpec represents the desired state for a target group (derived from IngressRule)
@@ -34,13 +35,14 @@ type TargetGroupSpec struct {
 }
 
 type TargetGroupResource struct {
-	Name         string
-	ManifestName string // Original rule identifier
-	Desired      *TargetGroupSpec
-	Current      *types.TargetGroup
-	Action       TargetGroupAction
-	VpcID        string
-	Arn          string
+	Name            string
+	ManifestName    string // Original rule identifier
+	Desired         *TargetGroupSpec
+	Current         *types.TargetGroup
+	Action          TargetGroupAction
+	VpcID           string
+	Arn             string
+	RecreateReasons []string
 }
 
 type TargetGroupManager struct {
@@ -166,8 +168,14 @@ func (resource *TargetGroupResource) determineAction() {
 		return
 	}
 
-	// Check if configuration needs update
-	if resource.configChanged() {
+	if reasons := resource.immutableChangeReasons(); len(reasons) > 0 {
+		resource.Action = TargetGroupActionRecreate
+		resource.RecreateReasons = reasons
+		return
+	}
+
+	// Check if mutable configuration needs update
+	if resource.mutableConfigChanged() {
 		resource.Action = TargetGroupActionUpdate
 		return
 	}
@@ -175,25 +183,72 @@ func (resource *TargetGroupResource) determineAction() {
 	resource.Action = TargetGroupActionNoop
 }
 
-func (resource *TargetGroupResource) configChanged() bool {
+func (resource *TargetGroupResource) immutableChangeReasons() []string {
 	if resource.Current == nil || resource.Desired == nil {
-		return false
+		return nil
 	}
+
+	var reasons []string
 
 	// Port changed
 	if aws.ToInt32(resource.Current.Port) != int32(resource.Desired.Port) {
-		return true
+		reasons = append(reasons, "port changed (requires recreation)")
 	}
 
 	// Protocol changed
 	if string(resource.Current.Protocol) != resource.Desired.Protocol {
-		return true
+		reasons = append(reasons, "protocol changed (requires recreation)")
+	}
+
+	// Target type changed
+	if resource.Desired.TargetType != "" && string(resource.Current.TargetType) != resource.Desired.TargetType {
+		reasons = append(reasons, "targetType changed (requires recreation)")
+	}
+
+	// VPC changed
+	if resource.VpcID != "" && aws.ToString(resource.Current.VpcId) != resource.VpcID {
+		reasons = append(reasons, "vpcId changed (requires recreation)")
+	}
+
+	return reasons
+}
+
+func (resource *TargetGroupResource) mutableConfigChanged() bool {
+	if resource.Current == nil || resource.Desired == nil {
+		return false
 	}
 
 	// Health check changes require recreation (most settings)
 	if resource.Desired.HealthCheck != nil {
-		if resource.Current.HealthCheckPath != nil && aws.ToString(resource.Current.HealthCheckPath) != resource.Desired.HealthCheck.Path {
+		hc := resource.Desired.HealthCheck
+		if hc.Path != "" && aws.ToString(resource.Current.HealthCheckPath) != hc.Path {
 			return true
+		}
+		if hc.Protocol != "" && string(resource.Current.HealthCheckProtocol) != hc.Protocol {
+			return true
+		}
+		if hc.Port != "" && aws.ToString(resource.Current.HealthCheckPort) != hc.Port {
+			return true
+		}
+		if hc.Interval != 0 && aws.ToInt32(resource.Current.HealthCheckIntervalSeconds) != int32(hc.Interval) {
+			return true
+		}
+		if hc.Timeout != 0 && aws.ToInt32(resource.Current.HealthCheckTimeoutSeconds) != int32(hc.Timeout) {
+			return true
+		}
+		if hc.HealthyThreshold != 0 && aws.ToInt32(resource.Current.HealthyThresholdCount) != int32(hc.HealthyThreshold) {
+			return true
+		}
+		if hc.UnhealthyThreshold != 0 && aws.ToInt32(resource.Current.UnhealthyThresholdCount) != int32(hc.UnhealthyThreshold) {
+			return true
+		}
+		if hc.Matcher != "" {
+			if resource.Current.Matcher == nil || resource.Current.Matcher.HttpCode == nil {
+				return true
+			}
+			if aws.ToString(resource.Current.Matcher.HttpCode) != hc.Matcher {
+				return true
+			}
 		}
 	}
 
@@ -245,17 +300,25 @@ func (m *TargetGroupManager) Create(ctx context.Context, resource *TargetGroupRe
 }
 
 func (m *TargetGroupManager) Update(ctx context.Context, resource *TargetGroupResource) error {
-	// Target groups have limited update capability
-	// For significant changes, we need to recreate
-	log.Info("target group update detected - recreating", "name", resource.Name)
+	log.Info("updating target group", "name", resource.Name)
 
-	// Delete the old one
-	if err := m.client.DeleteTargetGroup(ctx, resource.Arn); err != nil {
-		return fmt.Errorf("failed to delete old target group: %w", err)
+	input := &awsclient.ModifyTargetGroupInput{}
+	if resource.Desired != nil {
+		hc := resource.Desired.HealthCheck
+		if hc != nil {
+			input.HealthCheckPath = hc.Path
+			input.HealthCheckProtocol = hc.Protocol
+			input.HealthCheckPort = hc.Port
+			input.HealthyThreshold = hc.HealthyThreshold
+			input.UnhealthyThreshold = hc.UnhealthyThreshold
+			input.Timeout = hc.Timeout
+			input.Interval = hc.Interval
+			input.Matcher = hc.Matcher
+		}
+		input.DeregistrationDelay = resource.Desired.DeregistrationDelay
 	}
 
-	// Create a new one
-	return m.Create(ctx, resource)
+	return m.client.ModifyTargetGroup(ctx, resource.Arn, input)
 }
 
 func (m *TargetGroupManager) Delete(ctx context.Context, resource *TargetGroupResource) error {
@@ -269,6 +332,8 @@ func (m *TargetGroupManager) Apply(ctx context.Context, resource *TargetGroupRes
 		return m.Create(ctx, resource)
 	case TargetGroupActionUpdate:
 		return m.Update(ctx, resource)
+	case TargetGroupActionRecreate:
+		return m.recreate(ctx, resource)
 	case TargetGroupActionDelete:
 		return m.Delete(ctx, resource)
 	case TargetGroupActionNoop:
@@ -277,4 +342,15 @@ func (m *TargetGroupManager) Apply(ctx context.Context, resource *TargetGroupRes
 	default:
 		return fmt.Errorf("unknown action: %s", resource.Action)
 	}
+}
+
+func (m *TargetGroupManager) recreate(ctx context.Context, resource *TargetGroupResource) error {
+	// For immutable changes, we have to delete and recreate the target group.
+	log.Info("target group recreation required", "name", resource.Name)
+
+	if err := m.client.DeleteTargetGroup(ctx, resource.Arn); err != nil {
+		return fmt.Errorf("failed to delete old target group: %w", err)
+	}
+
+	return m.Create(ctx, resource)
 }

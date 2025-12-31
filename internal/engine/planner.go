@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/qdo/ecsmate/internal/config"
@@ -28,10 +30,10 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 	}
 
 	p.planTaskDefs(state, plan)
-	p.planServices(state, plan)
-	p.planScheduledTasks(state, plan)
 	p.planTargetGroups(state, plan)
 	p.planListenerRules(state, plan)
+	p.planServices(state, plan)
+	p.planScheduledTasks(state, plan)
 
 	plan.Summary = p.calculateSummary(plan.Entries)
 
@@ -81,19 +83,19 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 		switch svc.Action {
 		case resources.ServiceActionCreate:
 			entry.Type = diff.DiffTypeCreate
-			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs)
+			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
 			plan.Summary.Creates++
 
 		case resources.ServiceActionUpdate:
 			entry.Type = diff.DiffTypeUpdate
 			entry.Current = buildServiceCurrentView(svc)
-			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs)
+			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
 			plan.Summary.Updates++
 
 		case resources.ServiceActionRecreate:
 			entry.Type = diff.DiffTypeRecreate
 			entry.Current = buildServiceCurrentView(svc)
-			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs)
+			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
 			entry.RecreateReasons = svc.RecreateReasons
 			plan.Summary.Recreates++
 
@@ -161,6 +163,14 @@ func (p *Planner) planTargetGroups(state *resources.DesiredState, plan *Plan) {
 			entry.Desired = buildTargetGroupView(tg)
 			plan.Summary.Updates++
 
+		case resources.TargetGroupActionRecreate:
+			entry.Type = diff.DiffTypeRecreate
+			entry.Current = buildTargetGroupCurrentView(tg)
+			entry.Desired = buildTargetGroupView(tg)
+			entry.RecreateReasons = tg.RecreateReasons
+			entry.Details = targetGroupRecreateDetails(state, tg)
+			plan.Summary.Recreates++
+
 		case resources.TargetGroupActionDelete:
 			entry.Type = diff.DiffTypeDelete
 			entry.Current = buildTargetGroupCurrentView(tg)
@@ -174,6 +184,42 @@ func (p *Planner) planTargetGroups(state *resources.DesiredState, plan *Plan) {
 		_ = key
 		plan.Entries = append(plan.Entries, entry)
 	}
+}
+
+func targetGroupRecreateDetails(state *resources.DesiredState, tg *resources.TargetGroupResource) string {
+	if state == nil || tg == nil || tg.Arn == "" {
+		return ""
+	}
+
+	var deps []string
+	for _, rule := range state.ListenerRules {
+		if rule == nil || rule.TargetGroupArn == "" {
+			continue
+		}
+		if rule.TargetGroupArn == tg.Arn {
+			deps = append(deps, fmt.Sprintf("ListenerRule/priority-%d", rule.Priority))
+		}
+	}
+
+	if len(deps) == 0 {
+		return ""
+	}
+
+	sort.Strings(deps)
+
+	var b strings.Builder
+	b.WriteString("dependent listener rules:\n")
+	for _, dep := range deps {
+		b.WriteString("  - ")
+		b.WriteString(dep)
+		b.WriteString("\n")
+	}
+	b.WriteString("apply order:\n")
+	b.WriteString("  - update listener rules to detach from target group\n")
+	b.WriteString("  - recreate target group\n")
+	b.WriteString("  - update listener rules to attach new target group\n")
+
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func (p *Planner) planListenerRules(state *resources.DesiredState, plan *Plan) {
@@ -191,11 +237,13 @@ func (p *Planner) planListenerRules(state *resources.DesiredState, plan *Plan) {
 
 		case resources.ListenerRuleActionUpdate:
 			entry.Type = diff.DiffTypeUpdate
+			entry.Current = buildListenerRuleCurrentView(rule)
 			entry.Desired = buildListenerRuleView(rule)
 			plan.Summary.Updates++
 
 		case resources.ListenerRuleActionDelete:
 			entry.Type = diff.DiffTypeDelete
+			entry.Current = buildListenerRuleCurrentView(rule)
 			plan.Summary.Deletes++
 
 		case resources.ListenerRuleActionNoop:
@@ -408,14 +456,15 @@ func buildTaskDefCurrentView(td *resources.TaskDefResource) TaskDefView {
 }
 
 type ServiceView struct {
-	Cluster              string                `json:"cluster"`
-	TaskDefinition       string                `json:"taskDefinition"`
-	DesiredCount         int                   `json:"desiredCount"`
-	LaunchType           string                `json:"launchType,omitempty"`
-	NetworkConfiguration *NetworkConfigView    `json:"networkConfiguration,omitempty"`
-	LoadBalancers        []LoadBalancerView    `json:"loadBalancers,omitempty"`
-	ServiceRegistries    []ServiceRegistryView `json:"serviceRegistries,omitempty"`
-	Deployment           *DeploymentConfigView `json:"deployment,omitempty"`
+	Cluster                       string                `json:"cluster"`
+	TaskDefinition                string                `json:"taskDefinition"`
+	DesiredCount                  int                   `json:"desiredCount"`
+	LaunchType                    string                `json:"launchType,omitempty"`
+	HealthCheckGracePeriodSeconds *int                  `json:"healthCheckGracePeriodSeconds,omitempty"`
+	NetworkConfiguration          *NetworkConfigView    `json:"networkConfiguration,omitempty"`
+	LoadBalancers                 []LoadBalancerView    `json:"loadBalancers,omitempty"`
+	ServiceRegistries             []ServiceRegistryView `json:"serviceRegistries,omitempty"`
+	Deployment                    *DeploymentConfigView `json:"deployment,omitempty"`
 }
 
 type NetworkConfigView struct {
@@ -439,8 +488,8 @@ type ServiceRegistryView struct {
 
 type DeploymentConfigView struct {
 	Strategy               string `json:"strategy"`
-	MinimumHealthyPercent  int    `json:"minimumHealthyPercent,omitempty"`
-	MaximumPercent         int    `json:"maximumPercent,omitempty"`
+	MinimumHealthyPercent  *int   `json:"minimumHealthyPercent,omitempty"`
+	MaximumPercent         *int   `json:"maximumPercent,omitempty"`
 	CircuitBreakerEnable   bool   `json:"circuitBreakerEnable,omitempty"`
 	CircuitBreakerRollback bool   `json:"circuitBreakerRollback,omitempty"`
 }
@@ -450,7 +499,7 @@ const (
 	pendingTaskDefRevision = "(new revision after apply)"
 )
 
-func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, taskDefs map[string]*resources.TaskDefResource) ServiceView {
+func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, taskDefs map[string]*resources.TaskDefResource, targetGroups map[string]*resources.TargetGroupResource, manifestName string) ServiceView {
 	view := ServiceView{}
 
 	if svc.Desired != nil {
@@ -461,11 +510,15 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 		view.TaskDefinition = svc.TaskDefinitionArn
 		view.DesiredCount = svc.Desired.DesiredCount
 		view.LaunchType = svc.Desired.LaunchType
+		if svc.Desired.HealthCheckGracePeriodSecondsSet {
+			value := svc.Desired.HealthCheckGracePeriodSeconds
+			view.HealthCheckGracePeriodSeconds = &value
+		}
 
 		if svc.Desired.NetworkConfiguration != nil {
 			view.NetworkConfiguration = &NetworkConfigView{
-				Subnets:        svc.Desired.NetworkConfiguration.Subnets,
-				SecurityGroups: svc.Desired.NetworkConfiguration.SecurityGroups,
+				Subnets:        sortedStrings(svc.Desired.NetworkConfiguration.Subnets),
+				SecurityGroups: sortedStrings(svc.Desired.NetworkConfiguration.SecurityGroups),
 				AssignPublicIp: svc.Desired.NetworkConfiguration.AssignPublicIp,
 			}
 		}
@@ -487,15 +540,21 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 			})
 		}
 
-		addIngressLoadBalancerPlaceholders(&view, svc.Desired, ingress)
+		addIngressLoadBalancerPlaceholders(&view, svc.Desired, ingress, svc.Name, targetGroups, manifestName)
 		addTaskDefinitionPlaceholder(&view, svc.Desired, taskDefs)
 
 		view.Deployment = &DeploymentConfigView{
 			Strategy:               svc.Desired.Deployment.Strategy,
-			MinimumHealthyPercent:  svc.Desired.Deployment.MinimumHealthyPercent,
-			MaximumPercent:         svc.Desired.Deployment.MaximumPercent,
 			CircuitBreakerEnable:   svc.Desired.Deployment.CircuitBreakerEnable,
 			CircuitBreakerRollback: svc.Desired.Deployment.CircuitBreakerRollback,
+		}
+		if svc.Desired.Deployment.MinimumHealthyPercentSet {
+			value := svc.Desired.Deployment.MinimumHealthyPercent
+			view.Deployment.MinimumHealthyPercent = &value
+		}
+		if svc.Desired.Deployment.MaximumPercentSet {
+			value := svc.Desired.Deployment.MaximumPercent
+			view.Deployment.MaximumPercent = &value
 		}
 	}
 
@@ -532,13 +591,13 @@ func addTaskDefinitionPlaceholder(view *ServiceView, svc *config.Service, taskDe
 	view.TaskDefinition = base + ":" + pendingTaskDefRevision
 }
 
-func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, ingress *config.Ingress) {
+func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, ingress *config.Ingress, serviceName string, targetGroups map[string]*resources.TargetGroupResource, manifestName string) {
 	if ingress == nil || svc == nil {
 		return
 	}
 
 	for _, rule := range ingress.Rules {
-		if rule.Service == nil || rule.Service.Name != svc.Name {
+		if rule.Service == nil || rule.Service.Name != serviceName {
 			continue
 		}
 
@@ -553,7 +612,11 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 			lb := &view.LoadBalancers[i]
 			if lb.ContainerName == containerName && lb.ContainerPort == containerPort {
 				if lb.TargetGroupArn == "" {
-					lb.TargetGroupArn = pendingTargetGroupArn
+					if arn := resolveTargetGroupArn(targetGroups, manifestName, rule.Priority); arn != "" {
+						lb.TargetGroupArn = arn
+					} else {
+						lb.TargetGroupArn = pendingTargetGroupArn
+					}
 				}
 				updated = true
 				break
@@ -561,13 +624,39 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 		}
 
 		if !updated {
+			targetGroupArn := resolveTargetGroupArn(targetGroups, manifestName, rule.Priority)
+			if targetGroupArn == "" {
+				targetGroupArn = pendingTargetGroupArn
+			}
 			view.LoadBalancers = append(view.LoadBalancers, LoadBalancerView{
-				TargetGroupArn: pendingTargetGroupArn,
+				TargetGroupArn: targetGroupArn,
 				ContainerName:  containerName,
 				ContainerPort:  containerPort,
 			})
 		}
 	}
+}
+
+func resolveTargetGroupArn(targetGroups map[string]*resources.TargetGroupResource, manifestName string, priority int) string {
+	if targetGroups == nil || manifestName == "" || priority == 0 {
+		return ""
+	}
+
+	targetGroupName := fmt.Sprintf("%s-r%d", manifestName, priority)
+	for _, tg := range targetGroups {
+		if tg != nil && tg.Name == targetGroupName {
+			return tg.Arn
+		}
+	}
+
+	return ""
+}
+
+func manifestName(state *resources.DesiredState) string {
+	if state == nil || state.Manifest == nil {
+		return ""
+	}
+	return state.Manifest.Name
 }
 
 func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
@@ -582,12 +671,16 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 		}
 		view.DesiredCount = int(svc.Current.DesiredCount)
 		view.LaunchType = string(svc.Current.LaunchType)
+		if svc.Desired != nil && svc.Desired.HealthCheckGracePeriodSecondsSet && svc.Current.HealthCheckGracePeriodSeconds != nil {
+			value := int(*svc.Current.HealthCheckGracePeriodSeconds)
+			view.HealthCheckGracePeriodSeconds = &value
+		}
 
 		if svc.Current.NetworkConfiguration != nil && svc.Current.NetworkConfiguration.AwsvpcConfiguration != nil {
 			vpc := svc.Current.NetworkConfiguration.AwsvpcConfiguration
 			view.NetworkConfiguration = &NetworkConfigView{
-				Subnets:        vpc.Subnets,
-				SecurityGroups: vpc.SecurityGroups,
+				Subnets:        sortedStrings(vpc.Subnets),
+				SecurityGroups: sortedStrings(vpc.SecurityGroups),
 				AssignPublicIp: string(vpc.AssignPublicIp),
 			}
 		}
@@ -627,10 +720,12 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 			dc := svc.Current.DeploymentConfiguration
 			view.Deployment = &DeploymentConfigView{}
 			if dc.MinimumHealthyPercent != nil {
-				view.Deployment.MinimumHealthyPercent = int(*dc.MinimumHealthyPercent)
+				value := int(*dc.MinimumHealthyPercent)
+				view.Deployment.MinimumHealthyPercent = &value
 			}
 			if dc.MaximumPercent != nil {
-				view.Deployment.MaximumPercent = int(*dc.MaximumPercent)
+				value := int(*dc.MaximumPercent)
+				view.Deployment.MaximumPercent = &value
 			}
 			if dc.DeploymentCircuitBreaker != nil {
 				view.Deployment.CircuitBreakerEnable = dc.DeploymentCircuitBreaker.Enable
@@ -664,8 +759,8 @@ func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTask
 
 		if task.Desired.NetworkConfiguration != nil {
 			view.NetworkConfig = &NetworkConfigView{
-				Subnets:        task.Desired.NetworkConfiguration.Subnets,
-				SecurityGroups: task.Desired.NetworkConfiguration.SecurityGroups,
+				Subnets:        sortedStrings(task.Desired.NetworkConfiguration.Subnets),
+				SecurityGroups: sortedStrings(task.Desired.NetworkConfiguration.SecurityGroups),
 				AssignPublicIp: task.Desired.NetworkConfiguration.AssignPublicIp,
 			}
 		}
@@ -684,9 +779,14 @@ type TargetGroupView struct {
 }
 
 type HealthCheckView struct {
-	Path     string `json:"path,omitempty"`
-	Protocol string `json:"protocol,omitempty"`
-	Matcher  string `json:"matcher,omitempty"`
+	Path               string `json:"path,omitempty"`
+	Protocol           string `json:"protocol,omitempty"`
+	Port               string `json:"port,omitempty"`
+	HealthyThreshold   int    `json:"healthyThreshold,omitempty"`
+	UnhealthyThreshold int    `json:"unhealthyThreshold,omitempty"`
+	Timeout            int    `json:"timeout,omitempty"`
+	Interval           int    `json:"interval,omitempty"`
+	Matcher            string `json:"matcher,omitempty"`
 }
 
 func buildTargetGroupView(tg *resources.TargetGroupResource) TargetGroupView {
@@ -698,13 +798,20 @@ func buildTargetGroupView(tg *resources.TargetGroupResource) TargetGroupView {
 		view.Port = tg.Desired.Port
 		view.Protocol = tg.Desired.Protocol
 		view.TargetType = tg.Desired.TargetType
-		view.Tags = tg.Desired.Tags
+		if tg.Current == nil {
+			view.Tags = tg.Desired.Tags
+		}
 
 		if tg.Desired.HealthCheck != nil {
 			view.HealthCheck = &HealthCheckView{
-				Path:     tg.Desired.HealthCheck.Path,
-				Protocol: tg.Desired.HealthCheck.Protocol,
-				Matcher:  tg.Desired.HealthCheck.Matcher,
+				Path:               tg.Desired.HealthCheck.Path,
+				Protocol:           tg.Desired.HealthCheck.Protocol,
+				Port:               tg.Desired.HealthCheck.Port,
+				HealthyThreshold:   tg.Desired.HealthCheck.HealthyThreshold,
+				UnhealthyThreshold: tg.Desired.HealthCheck.UnhealthyThreshold,
+				Timeout:            tg.Desired.HealthCheck.Timeout,
+				Interval:           tg.Desired.HealthCheck.Interval,
+				Matcher:            tg.Desired.HealthCheck.Matcher,
 			}
 		}
 	}
@@ -731,6 +838,21 @@ func buildTargetGroupCurrentView(tg *resources.TargetGroupResource) TargetGroupV
 			if tg.Current.HealthCheckProtocol != "" {
 				view.HealthCheck.Protocol = string(tg.Current.HealthCheckProtocol)
 			}
+			if tg.Current.HealthCheckPort != nil {
+				view.HealthCheck.Port = *tg.Current.HealthCheckPort
+			}
+			if tg.Current.HealthyThresholdCount != nil {
+				view.HealthCheck.HealthyThreshold = int(*tg.Current.HealthyThresholdCount)
+			}
+			if tg.Current.UnhealthyThresholdCount != nil {
+				view.HealthCheck.UnhealthyThreshold = int(*tg.Current.UnhealthyThresholdCount)
+			}
+			if tg.Current.HealthCheckTimeoutSeconds != nil {
+				view.HealthCheck.Timeout = int(*tg.Current.HealthCheckTimeoutSeconds)
+			}
+			if tg.Current.HealthCheckIntervalSeconds != nil {
+				view.HealthCheck.Interval = int(*tg.Current.HealthCheckIntervalSeconds)
+			}
 			if tg.Current.Matcher != nil && tg.Current.Matcher.HttpCode != nil {
 				view.HealthCheck.Matcher = *tg.Current.Matcher.HttpCode
 			}
@@ -740,13 +862,24 @@ func buildTargetGroupCurrentView(tg *resources.TargetGroupResource) TargetGroupV
 	return view
 }
 
+func sortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, len(values))
+	copy(result, values)
+	sort.Strings(result)
+	return result
+}
+
 type ListenerRuleView struct {
-	Priority int           `json:"priority"`
-	Host     string        `json:"host,omitempty"`
-	Hosts    []string      `json:"hosts,omitempty"`
-	Paths    []string      `json:"paths,omitempty"`
-	Service  *ServiceRef   `json:"service,omitempty"`
-	Redirect *RedirectView `json:"redirect,omitempty"`
+	Priority       int           `json:"priority"`
+	Host           string        `json:"host,omitempty"`
+	Hosts          []string      `json:"hosts,omitempty"`
+	Paths          []string      `json:"paths,omitempty"`
+	TargetGroupArn string        `json:"targetGroupArn,omitempty"`
+	Service        *ServiceRef   `json:"service,omitempty"`
+	Redirect       *RedirectView `json:"redirect,omitempty"`
 }
 
 type ServiceRef struct {
@@ -776,6 +909,9 @@ func buildListenerRuleView(rule *resources.ListenerRuleResource) ListenerRuleVie
 				Name:          rule.Desired.Service.Name,
 				ContainerPort: rule.Desired.Service.ContainerPort,
 			}
+			if rule.TargetGroupArn != "" {
+				view.TargetGroupArn = rule.TargetGroupArn
+			}
 		}
 
 		if rule.Desired.Redirect != nil {
@@ -784,6 +920,95 @@ func buildListenerRuleView(rule *resources.ListenerRuleResource) ListenerRuleVie
 				Protocol:   rule.Desired.Redirect.Protocol,
 				Host:       rule.Desired.Redirect.Host,
 				Path:       rule.Desired.Redirect.Path,
+			}
+		}
+	}
+
+	return view
+}
+
+func buildListenerRuleCurrentView(rule *resources.ListenerRuleResource) ListenerRuleView {
+	view := ListenerRuleView{
+		Priority: rule.Priority,
+	}
+
+	if rule.Current == nil {
+		return view
+	}
+
+	if rule.Current.Priority != nil {
+		if priority, err := strconv.Atoi(*rule.Current.Priority); err == nil {
+			view.Priority = priority
+		}
+	}
+
+	var hosts []string
+	var paths []string
+	for _, cond := range rule.Current.Conditions {
+		if cond.Field == nil {
+			continue
+		}
+
+		switch *cond.Field {
+		case "host-header":
+			if cond.HostHeaderConfig != nil && len(cond.HostHeaderConfig.Values) > 0 {
+				hosts = append(hosts, cond.HostHeaderConfig.Values...)
+			} else if len(cond.Values) > 0 {
+				hosts = append(hosts, cond.Values...)
+			}
+		case "path-pattern":
+			if cond.PathPatternConfig != nil && len(cond.PathPatternConfig.Values) > 0 {
+				paths = append(paths, cond.PathPatternConfig.Values...)
+			} else if len(cond.Values) > 0 {
+				paths = append(paths, cond.Values...)
+			}
+		}
+	}
+
+	if len(hosts) == 1 {
+		view.Host = hosts[0]
+	} else if len(hosts) > 1 {
+		view.Hosts = hosts
+	}
+	if len(paths) > 0 {
+		view.Paths = paths
+	}
+
+	var targetGroupArn string
+	for _, action := range rule.Current.Actions {
+		switch string(action.Type) {
+		case "forward":
+			if action.TargetGroupArn != nil {
+				targetGroupArn = *action.TargetGroupArn
+			} else if action.ForwardConfig != nil && len(action.ForwardConfig.TargetGroups) > 0 {
+				if action.ForwardConfig.TargetGroups[0].TargetGroupArn != nil {
+					targetGroupArn = *action.ForwardConfig.TargetGroups[0].TargetGroupArn
+				}
+			}
+		case "redirect":
+			if action.RedirectConfig != nil {
+				view.Redirect = &RedirectView{
+					StatusCode: string(action.RedirectConfig.StatusCode),
+				}
+				if action.RedirectConfig.Protocol != nil {
+					view.Redirect.Protocol = *action.RedirectConfig.Protocol
+				}
+				if action.RedirectConfig.Host != nil {
+					view.Redirect.Host = *action.RedirectConfig.Host
+				}
+				if action.RedirectConfig.Path != nil {
+					view.Redirect.Path = *action.RedirectConfig.Path
+				}
+			}
+		}
+	}
+
+	if targetGroupArn != "" {
+		view.TargetGroupArn = targetGroupArn
+		if rule.Desired != nil && rule.Desired.Service != nil && targetGroupArn == rule.TargetGroupArn {
+			view.Service = &ServiceRef{
+				Name:          rule.Desired.Service.Name,
+				ContainerPort: rule.Desired.Service.ContainerPort,
 			}
 		}
 	}

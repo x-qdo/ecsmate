@@ -113,15 +113,15 @@ func (r *Renderer) RenderDiff(entries []DiffEntry) {
 // sortByExecutionPhase sorts entries according to the execution order:
 // Phase 1: Dependencies (TargetGroup)
 // Phase 2: Core Resources (TaskDefinition)
-// Phase 3: Deployments (Service, ScheduledTask)
-// Phase 4: Routing (ListenerRule)
+// Phase 3: Routing (ListenerRule)
+// Phase 4: Deployments (Service, ScheduledTask)
 func sortByExecutionPhase(entries []DiffEntry) {
 	phaseOrder := map[string]int{
 		"TargetGroup":    1,
 		"TaskDefinition": 2,
-		"Service":        3,
-		"ScheduledTask":  3,
-		"ListenerRule":   4,
+		"ListenerRule":   3,
+		"Service":        4,
+		"ScheduledTask":  4,
 	}
 
 	sort.SliceStable(entries, func(i, j int) bool {
@@ -296,6 +296,9 @@ func (r *Renderer) renderBoxedMapDiff(current, desired map[string]interface{}, i
 			}
 		} else {
 			// Unchanged - show as context (dimmed), expand complex values
+			if key == "environment" {
+				continue
+			}
 			r.renderBoxedContextField(key, currentVal, indent)
 		}
 	}

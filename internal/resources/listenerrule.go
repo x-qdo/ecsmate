@@ -102,8 +102,108 @@ func (resource *ListenerRuleResource) determineAction() {
 		return
 	}
 
-	// Always update to ensure consistency (simplified change detection)
-	resource.Action = ListenerRuleActionUpdate
+	if resource.configChanged() {
+		resource.Action = ListenerRuleActionUpdate
+		return
+	}
+
+	resource.Action = ListenerRuleActionNoop
+}
+
+func (resource *ListenerRuleResource) configChanged() bool {
+	if resource.Desired == nil || resource.Current == nil {
+		return false
+	}
+
+	desiredHosts, desiredPaths := normalizeIngressConditions(resource.Desired)
+	currentHosts, currentPaths := extractIngressConditions(resource.Current)
+	if !conditionsMatch(desiredHosts, desiredPaths, currentHosts, currentPaths) {
+		return true
+	}
+
+	desired := resource.Desired
+
+	switch {
+	case desired.Service != nil:
+		return !actionForwardMatches(resource.Current, resource.TargetGroupArn)
+	case desired.Redirect != nil:
+		return !actionRedirectMatches(resource.Current, desired.Redirect)
+	case desired.FixedResponse != nil:
+		return !actionFixedResponseMatches(resource.Current, desired.FixedResponse)
+	default:
+		return false
+	}
+}
+
+func actionForwardMatches(rule *types.Rule, targetGroupArn string) bool {
+	if rule == nil {
+		return false
+	}
+	if targetGroupArn == "" {
+		return false
+	}
+	for _, action := range rule.Actions {
+		if action.Type != types.ActionTypeEnumForward {
+			continue
+		}
+		return extractTargetGroupArn(rule) == targetGroupArn
+	}
+	return false
+}
+
+func actionRedirectMatches(rule *types.Rule, desired *config.IngressRedirect) bool {
+	if rule == nil || desired == nil {
+		return false
+	}
+	for _, action := range rule.Actions {
+		if action.Type != types.ActionTypeEnumRedirect || action.RedirectConfig == nil {
+			continue
+		}
+		rc := action.RedirectConfig
+		if string(rc.StatusCode) != desired.StatusCode {
+			return false
+		}
+		if desired.Protocol != "" && aws.ToString(rc.Protocol) != desired.Protocol {
+			return false
+		}
+		if desired.Host != "" && aws.ToString(rc.Host) != desired.Host {
+			return false
+		}
+		if desired.Port != "" && aws.ToString(rc.Port) != desired.Port {
+			return false
+		}
+		if desired.Path != "" && aws.ToString(rc.Path) != desired.Path {
+			return false
+		}
+		if desired.Query != "" && aws.ToString(rc.Query) != desired.Query {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func actionFixedResponseMatches(rule *types.Rule, desired *config.IngressFixedResponse) bool {
+	if rule == nil || desired == nil {
+		return false
+	}
+	for _, action := range rule.Actions {
+		if action.Type != types.ActionTypeEnumFixedResponse || action.FixedResponseConfig == nil {
+			continue
+		}
+		fc := action.FixedResponseConfig
+		if aws.ToString(fc.StatusCode) != desired.StatusCode {
+			return false
+		}
+		if desired.ContentType != "" && aws.ToString(fc.ContentType) != desired.ContentType {
+			return false
+		}
+		if desired.MessageBody != "" && aws.ToString(fc.MessageBody) != desired.MessageBody {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 func (m *ListenerRuleManager) Create(ctx context.Context, resource *ListenerRuleResource) error {

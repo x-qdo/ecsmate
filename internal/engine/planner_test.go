@@ -3,6 +3,10 @@ package engine
 import (
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+
 	"github.com/qdo/ecsmate/internal/config"
 	"github.com/qdo/ecsmate/internal/diff"
 	"github.com/qdo/ecsmate/internal/resources"
@@ -251,25 +255,29 @@ func TestBuildServiceView(t *testing.T) {
 		Name:              "web",
 		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/myapp-php:42",
 		Desired: &config.Service{
-			Name:         "web",
-			Cluster:      "production-cluster",
-			DesiredCount: 3,
-			LaunchType:   "FARGATE",
+			Name:                             "web",
+			Cluster:                          "production-cluster",
+			DesiredCount:                     3,
+			LaunchType:                       "FARGATE",
+			HealthCheckGracePeriodSeconds:    20,
+			HealthCheckGracePeriodSecondsSet: true,
 			NetworkConfiguration: &config.NetworkConfiguration{
 				Subnets:        []string{"subnet-1", "subnet-2"},
 				SecurityGroups: []string{"sg-1"},
 				AssignPublicIp: "DISABLED",
 			},
 			Deployment: config.DeploymentConfig{
-				Strategy:              "rolling",
-				MinimumHealthyPercent: 50,
-				MaximumPercent:        200,
-				CircuitBreakerEnable:  true,
+				Strategy:                 "rolling",
+				MinimumHealthyPercent:    50,
+				MaximumPercent:           200,
+				MinimumHealthyPercentSet: true,
+				MaximumPercentSet:        true,
+				CircuitBreakerEnable:     true,
 			},
 		},
 	}
 
-	view := buildServiceView(svc, nil, nil)
+	view := buildServiceView(svc, nil, nil, nil, "")
 
 	if view.Cluster != "production-cluster" {
 		t.Errorf("expected cluster 'production-cluster', got '%s'", view.Cluster)
@@ -295,8 +303,68 @@ func TestBuildServiceView(t *testing.T) {
 		t.Errorf("expected strategy 'rolling', got '%s'", view.Deployment.Strategy)
 	}
 
+	if view.HealthCheckGracePeriodSeconds == nil || *view.HealthCheckGracePeriodSeconds != 20 {
+		t.Fatalf("expected healthCheckGracePeriodSeconds 20, got %v", view.HealthCheckGracePeriodSeconds)
+	}
+
 	if !view.Deployment.CircuitBreakerEnable {
 		t.Error("expected circuit breaker to be enabled")
+	}
+}
+
+func TestBuildServiceView_SortsNetworkConfig(t *testing.T) {
+	svc := &resources.ServiceResource{
+		Name:              "web",
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/myapp-php:42",
+		Desired: &config.Service{
+			Name:         "web",
+			Cluster:      "production-cluster",
+			DesiredCount: 1,
+			NetworkConfiguration: &config.NetworkConfiguration{
+				Subnets:        []string{"subnet-b", "subnet-a"},
+				SecurityGroups: []string{"sg-2", "sg-1"},
+				AssignPublicIp: "DISABLED",
+			},
+		},
+	}
+
+	view := buildServiceView(svc, nil, nil, nil, "")
+
+	if view.NetworkConfiguration == nil {
+		t.Fatal("expected network configuration, got nil")
+	}
+	if got := view.NetworkConfiguration.Subnets; len(got) != 2 || got[0] != "subnet-a" || got[1] != "subnet-b" {
+		t.Fatalf("expected sorted subnets, got %v", got)
+	}
+	if got := view.NetworkConfiguration.SecurityGroups; len(got) != 2 || got[0] != "sg-1" || got[1] != "sg-2" {
+		t.Fatalf("expected sorted security groups, got %v", got)
+	}
+}
+
+func TestBuildServiceCurrentView_SortsNetworkConfig(t *testing.T) {
+	svc := &resources.ServiceResource{
+		Current: &types.Service{
+			NetworkConfiguration: &types.NetworkConfiguration{
+				AwsvpcConfiguration: &types.AwsVpcConfiguration{
+					Subnets:        []string{"subnet-b", "subnet-a"},
+					SecurityGroups: []string{"sg-2", "sg-1"},
+					AssignPublicIp: types.AssignPublicIpDisabled,
+				},
+			},
+			DesiredCount: 1,
+		},
+	}
+
+	view := buildServiceCurrentView(svc)
+
+	if view.NetworkConfiguration == nil {
+		t.Fatal("expected network configuration, got nil")
+	}
+	if got := view.NetworkConfiguration.Subnets; len(got) != 2 || got[0] != "subnet-a" || got[1] != "subnet-b" {
+		t.Fatalf("expected sorted subnets, got %v", got)
+	}
+	if got := view.NetworkConfiguration.SecurityGroups; len(got) != 2 || got[0] != "sg-1" || got[1] != "sg-2" {
+		t.Fatalf("expected sorted security groups, got %v", got)
 	}
 }
 
@@ -323,13 +391,54 @@ func TestBuildServiceView_IngressPlaceholder(t *testing.T) {
 		},
 	}
 
-	view := buildServiceView(svc, ingress, nil)
+	view := buildServiceView(svc, ingress, nil, nil, "")
 
 	if len(view.LoadBalancers) != 1 {
 		t.Fatalf("expected 1 load balancer, got %d", len(view.LoadBalancers))
 	}
 	if view.LoadBalancers[0].TargetGroupArn != pendingTargetGroupArn {
 		t.Errorf("expected pending target group placeholder, got %q", view.LoadBalancers[0].TargetGroupArn)
+	}
+}
+
+func TestBuildServiceView_IngressPlaceholder_UsesExistingTargetGroup(t *testing.T) {
+	svc := &resources.ServiceResource{
+		Name:              "telemetry",
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/telemetry:1",
+		Desired: &config.Service{
+			Name:         "telemetry",
+			Cluster:      "stage-cluster",
+			DesiredCount: 1,
+		},
+	}
+
+	ingress := &config.Ingress{
+		Rules: []config.IngressRule{
+			{
+				Priority: 101,
+				Service: &config.IngressServiceBackend{
+					Name:          "telemetry",
+					ContainerName: "app",
+					ContainerPort: 8080,
+				},
+			},
+		},
+	}
+
+	targetGroups := map[string]*resources.TargetGroupResource{
+		"rule-0": {
+			Name: "cal-r101",
+			Arn:  "arn:aws:elasticloadbalancing:us-east-1:123456789:targetgroup/cal-r101/abc123",
+		},
+	}
+
+	view := buildServiceView(svc, ingress, nil, targetGroups, "cal")
+
+	if len(view.LoadBalancers) != 1 {
+		t.Fatalf("expected 1 load balancer, got %d", len(view.LoadBalancers))
+	}
+	if view.LoadBalancers[0].TargetGroupArn != targetGroups["rule-0"].Arn {
+		t.Errorf("expected target group arn %q, got %q", targetGroups["rule-0"].Arn, view.LoadBalancers[0].TargetGroupArn)
 	}
 }
 
@@ -355,11 +464,60 @@ func TestBuildServiceView_TaskDefinitionPlaceholder(t *testing.T) {
 		},
 	}
 
-	view := buildServiceView(svc, nil, taskDefs)
+	view := buildServiceView(svc, nil, taskDefs, nil, "")
 
 	expected := "arn:aws:ecs:eu-west-1:570129572534:task-definition/cal-web:(new revision after apply)"
 	if view.TaskDefinition != expected {
 		t.Errorf("expected taskDefinition %q, got %q", expected, view.TaskDefinition)
+	}
+}
+
+func TestPlanTargetGroups_RecreateAddsDependencyDetails(t *testing.T) {
+	tg := &resources.TargetGroupResource{
+		Name:    "cal-r100",
+		Arn:     "arn:aws:elasticloadbalancing:us-east-1:123456789:targetgroup/cal-r100/abc",
+		Action:  resources.TargetGroupActionRecreate,
+		Desired: &resources.TargetGroupSpec{Port: 80, Protocol: "HTTP"},
+		Current: &elbv2types.TargetGroup{
+			Port:     aws.Int32(8080),
+			Protocol: elbv2types.ProtocolEnumHttp,
+		},
+		RecreateReasons: []string{"port changed (requires recreation)"},
+	}
+	state := &resources.DesiredState{
+		TargetGroups: map[string]*resources.TargetGroupResource{
+			"rule-0": tg,
+		},
+		ListenerRules: []*resources.ListenerRuleResource{
+			{
+				Priority:       100,
+				TargetGroupArn: tg.Arn,
+				Action:         resources.ListenerRuleActionNoop,
+			},
+		},
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	if len(plan.Entries) == 0 {
+		t.Fatal("expected plan entries")
+	}
+
+	var found bool
+	for _, entry := range plan.Entries {
+		if entry.Resource == "TargetGroup" && entry.Name == "cal-r100" {
+			found = true
+			if entry.Type != diff.DiffTypeRecreate {
+				t.Fatalf("expected recreate diff, got %s", entry.Type)
+			}
+			if entry.Details == "" {
+				t.Fatal("expected dependency details")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected target group entry")
 	}
 }
 

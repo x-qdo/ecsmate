@@ -51,6 +51,18 @@ type CreateTargetGroupInput struct {
 	Tags                map[string]string
 }
 
+type ModifyTargetGroupInput struct {
+	HealthCheckPath     string
+	HealthCheckProtocol string
+	HealthCheckPort     string
+	HealthyThreshold    int
+	UnhealthyThreshold  int
+	Timeout             int
+	Interval            int
+	Matcher             string
+	DeregistrationDelay int
+}
+
 func (c *ELBV2Client) CreateTargetGroup(ctx context.Context, input *CreateTargetGroupInput) (*types.TargetGroup, error) {
 	log.Debug("creating target group", "name", input.Name)
 
@@ -196,6 +208,64 @@ func (c *ELBV2Client) DeleteTargetGroup(ctx context.Context, arn string) error {
 	}
 
 	log.Info("deleted target group", "arn", arn)
+	return nil
+}
+
+func (c *ELBV2Client) ModifyTargetGroup(ctx context.Context, arn string, input *ModifyTargetGroupInput) error {
+	if arn == "" || input == nil {
+		return fmt.Errorf("target group arn and input are required")
+	}
+
+	modifyInput := &elasticloadbalancingv2.ModifyTargetGroupInput{
+		TargetGroupArn: aws.String(arn),
+	}
+
+	if input.HealthCheckPath != "" {
+		modifyInput.HealthCheckPath = aws.String(input.HealthCheckPath)
+	}
+	if input.HealthCheckProtocol != "" {
+		modifyInput.HealthCheckProtocol = types.ProtocolEnum(input.HealthCheckProtocol)
+	}
+	if input.HealthCheckPort != "" {
+		modifyInput.HealthCheckPort = aws.String(input.HealthCheckPort)
+	}
+	if input.HealthyThreshold > 0 {
+		modifyInput.HealthyThresholdCount = aws.Int32(int32(input.HealthyThreshold))
+	}
+	if input.UnhealthyThreshold > 0 {
+		modifyInput.UnhealthyThresholdCount = aws.Int32(int32(input.UnhealthyThreshold))
+	}
+	if input.Timeout > 0 {
+		modifyInput.HealthCheckTimeoutSeconds = aws.Int32(int32(input.Timeout))
+	}
+	if input.Interval > 0 {
+		modifyInput.HealthCheckIntervalSeconds = aws.Int32(int32(input.Interval))
+	}
+	if input.Matcher != "" {
+		modifyInput.Matcher = &types.Matcher{
+			HttpCode: aws.String(input.Matcher),
+		}
+	}
+
+	if _, err := c.client.ModifyTargetGroup(ctx, modifyInput); err != nil {
+		return fmt.Errorf("failed to modify target group %s: %w", arn, err)
+	}
+
+	if input.DeregistrationDelay > 0 {
+		_, err := c.client.ModifyTargetGroupAttributes(ctx, &elasticloadbalancingv2.ModifyTargetGroupAttributesInput{
+			TargetGroupArn: aws.String(arn),
+			Attributes: []types.TargetGroupAttribute{
+				{
+					Key:   aws.String("deregistration_delay.timeout_seconds"),
+					Value: aws.String(fmt.Sprintf("%d", input.DeregistrationDelay)),
+				},
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to modify target group attributes %s: %w", arn, err)
+		}
+	}
+
 	return nil
 }
 
