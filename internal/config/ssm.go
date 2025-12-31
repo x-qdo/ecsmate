@@ -204,27 +204,39 @@ func replaceInTaskDef(td *TaskDefinition, values map[string]string) {
 func replaceInService(svc *Service, values map[string]string) {
 	svc.Cluster = replaceInString(svc.Cluster, values)
 	if svc.NetworkConfiguration != nil {
-		for i := range svc.NetworkConfiguration.Subnets {
-			svc.NetworkConfiguration.Subnets[i] = replaceInString(svc.NetworkConfiguration.Subnets[i], values)
-		}
-		for i := range svc.NetworkConfiguration.SecurityGroups {
-			svc.NetworkConfiguration.SecurityGroups[i] = replaceInString(svc.NetworkConfiguration.SecurityGroups[i], values)
-		}
+		// Replace SSM refs and split comma-separated values (for StringList params)
+		svc.NetworkConfiguration.Subnets = replaceAndSplit(svc.NetworkConfiguration.Subnets, values)
+		svc.NetworkConfiguration.SecurityGroups = replaceAndSplit(svc.NetworkConfiguration.SecurityGroups, values)
 	}
 	for i := range svc.LoadBalancers {
 		svc.LoadBalancers[i].TargetGroupArn = replaceInString(svc.LoadBalancers[i].TargetGroupArn, values)
 	}
+	for i := range svc.ServiceRegistries {
+		svc.ServiceRegistries[i].RegistryArn = replaceInString(svc.ServiceRegistries[i].RegistryArn, values)
+	}
+}
+
+// replaceAndSplit replaces SSM refs and splits comma-separated values
+func replaceAndSplit(slice []string, values map[string]string) []string {
+	var result []string
+	for _, s := range slice {
+		resolved := replaceInString(s, values)
+		// Split comma-separated values (handles SSM StringList params)
+		parts := strings.Split(resolved, ",")
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+	}
+	return result
 }
 
 func replaceInScheduledTask(st *ScheduledTask, values map[string]string) {
 	st.Cluster = replaceInString(st.Cluster, values)
 	if st.NetworkConfiguration != nil {
-		for i := range st.NetworkConfiguration.Subnets {
-			st.NetworkConfiguration.Subnets[i] = replaceInString(st.NetworkConfiguration.Subnets[i], values)
-		}
-		for i := range st.NetworkConfiguration.SecurityGroups {
-			st.NetworkConfiguration.SecurityGroups[i] = replaceInString(st.NetworkConfiguration.SecurityGroups[i], values)
-		}
+		st.NetworkConfiguration.Subnets = replaceAndSplit(st.NetworkConfiguration.Subnets, values)
+		st.NetworkConfiguration.SecurityGroups = replaceAndSplit(st.NetworkConfiguration.SecurityGroups, values)
 	}
 	if st.Overrides != nil {
 		st.Overrides.TaskRoleArn = replaceInString(st.Overrides.TaskRoleArn, values)
