@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/cue/load"
 
@@ -124,9 +125,19 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 		}
 	}
 
+	// Check for schema import (strict mode)
+	if !HasSchemaImport(inst) {
+		return cue.Value{}, fmt.Errorf("strict mode: manifest must import schema package\n\nAdd to your CUE file:\n  import \"github.com/qdo/ecsmate/pkg/cue:schema\"\n  manifest: schema.#Manifest & { ... }")
+	}
+
 	// Validate against schema
 	if err := value.Validate(); err != nil {
-		return cue.Value{}, fmt.Errorf("CUE validation failed: %w", err)
+		return cue.Value{}, fmt.Errorf("CUE schema validation failed: %w", err)
+	}
+
+	// Verify manifest is constrained by schema
+	if !IsManifestConstrained(value) {
+		return cue.Value{}, fmt.Errorf("strict mode: manifest must be constrained by schema.#Manifest\n\nUse: manifest: schema.#Manifest & { ... }")
 	}
 
 	return value, nil
@@ -306,4 +317,28 @@ func ExtractStringSlice(v cue.Value, path string) ([]string, error) {
 	}
 
 	return result, nil
+}
+
+// HasSchemaImport checks if the CUE instance imports the schema package
+func HasSchemaImport(inst *build.Instance) bool {
+	for _, imp := range inst.Imports {
+		if imp.ImportPath == "github.com/qdo/ecsmate/pkg/cue:schema" {
+			return true
+		}
+	}
+	return false
+}
+
+// IsManifestConstrained checks if manifest is properly constrained by schema.
+// This validates that the manifest field exists and uses schema definitions.
+func IsManifestConstrained(value cue.Value) bool {
+	manifest := value.LookupPath(cue.ParsePath("manifest"))
+	if !manifest.Exists() {
+		return false
+	}
+
+	// If schema is imported and manifest validates, check that it has
+	// the expected structure from #Manifest (name field is required)
+	name := manifest.LookupPath(cue.ParsePath("name"))
+	return name.Exists() && name.Err() == nil
 }
