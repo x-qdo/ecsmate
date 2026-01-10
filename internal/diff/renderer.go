@@ -66,13 +66,14 @@ const (
 )
 
 type DiffEntry struct {
-	Type            DiffType
-	Name            string
-	Resource        string
-	Current         interface{}
-	Desired         interface{}
-	Details         string
-	RecreateReasons []string
+	Type              DiffType
+	Name              string
+	Resource          string
+	Current           interface{}
+	Desired           interface{}
+	Details           string
+	RecreateReasons   []string
+	PropagationReason string // Why this change was propagated from another resource
 }
 
 // RenderHeader displays the planning header with manifest name

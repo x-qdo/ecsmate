@@ -29,6 +29,13 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 		Entries: make([]diff.DiffEntry, 0),
 	}
 
+	// Build resource graph and propagate changes
+	graph, err := BuildResourceGraph(state)
+	if err == nil {
+		changes := graph.PropagateChanges()
+		applyPropagatedChanges(state, changes)
+	}
+
 	p.planTaskDefs(state, plan)
 	p.planTargetGroups(state, plan)
 	p.planListenerRules(state, plan)
@@ -38,6 +45,82 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 	plan.Summary = p.calculateSummary(plan.Entries)
 
 	return plan
+}
+
+// applyPropagatedChanges applies propagated changes from the DAG to the resource state
+func applyPropagatedChanges(state *resources.DesiredState, changes map[string]*Change) {
+	for nodeID, change := range changes {
+		if change.Reason == "" {
+			continue // Skip direct changes (not propagated)
+		}
+
+		parts := strings.SplitN(nodeID, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		nodeType, nodeName := parts[0], parts[1]
+
+		switch nodeType {
+		case "Service":
+			if svc, ok := state.Services[nodeName]; ok && svc.Action == resources.ServiceActionNoop {
+				svc.Action = serviceActionFromString(change.Action)
+				svc.PropagationReason = change.Reason
+			}
+		case "ListenerRule":
+			for _, rule := range state.ListenerRules {
+				if fmt.Sprintf("priority-%d", rule.Priority) == nodeName && rule.Action == resources.ListenerRuleActionNoop {
+					rule.Action = listenerRuleActionFromString(change.Action)
+					rule.PropagationReason = change.Reason
+				}
+			}
+		case "ScheduledTask":
+			if task, ok := state.ScheduledTasks[nodeName]; ok && task.Action == resources.ScheduledTaskActionNoop {
+				task.Action = scheduledTaskActionFromString(change.Action)
+				task.PropagationReason = change.Reason
+			}
+		}
+	}
+}
+
+func serviceActionFromString(action string) resources.ServiceAction {
+	switch action {
+	case "CREATE":
+		return resources.ServiceActionCreate
+	case "UPDATE":
+		return resources.ServiceActionUpdate
+	case "DELETE":
+		return resources.ServiceActionDelete
+	case "RECREATE":
+		return resources.ServiceActionRecreate
+	default:
+		return resources.ServiceActionNoop
+	}
+}
+
+func listenerRuleActionFromString(action string) resources.ListenerRuleAction {
+	switch action {
+	case "CREATE":
+		return resources.ListenerRuleActionCreate
+	case "UPDATE":
+		return resources.ListenerRuleActionUpdate
+	case "DELETE":
+		return resources.ListenerRuleActionDelete
+	default:
+		return resources.ListenerRuleActionNoop
+	}
+}
+
+func scheduledTaskActionFromString(action string) resources.ScheduledTaskAction {
+	switch action {
+	case "CREATE":
+		return resources.ScheduledTaskActionCreate
+	case "UPDATE":
+		return resources.ScheduledTaskActionUpdate
+	case "DELETE":
+		return resources.ScheduledTaskActionDelete
+	default:
+		return resources.ScheduledTaskActionNoop
+	}
 }
 
 func (p *Planner) planTaskDefs(state *resources.DesiredState, plan *Plan) {
@@ -76,8 +159,9 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 
 	for name, svc := range state.Services {
 		entry := diff.DiffEntry{
-			Name:     name,
-			Resource: "Service",
+			Name:              name,
+			Resource:          "Service",
+			PropagationReason: svc.PropagationReason,
 		}
 
 		switch svc.Action {
@@ -116,8 +200,9 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 func (p *Planner) planScheduledTasks(state *resources.DesiredState, plan *Plan) {
 	for name, task := range state.ScheduledTasks {
 		entry := diff.DiffEntry{
-			Name:     name,
-			Resource: "ScheduledTask",
+			Name:              name,
+			Resource:          "ScheduledTask",
+			PropagationReason: task.PropagationReason,
 		}
 
 		switch task.Action {
@@ -225,8 +310,9 @@ func targetGroupRecreateDetails(state *resources.DesiredState, tg *resources.Tar
 func (p *Planner) planListenerRules(state *resources.DesiredState, plan *Plan) {
 	for _, rule := range state.ListenerRules {
 		entry := diff.DiffEntry{
-			Name:     fmt.Sprintf("priority-%d", rule.Priority),
-			Resource: "ListenerRule",
+			Name:              fmt.Sprintf("priority-%d", rule.Priority),
+			Resource:          "ListenerRule",
+			PropagationReason: rule.PropagationReason,
 		}
 
 		switch rule.Action {

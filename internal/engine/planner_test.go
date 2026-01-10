@@ -746,3 +746,143 @@ func TestPlan_HasChanges_OnlyNoops(t *testing.T) {
 		t.Error("expected HasChanges to return false when only noops")
 	}
 }
+
+// Phase 4: Tests for planner integration with propagation
+
+func TestPlanner_GeneratePlan_PropagatesTargetGroupDelete(t *testing.T) {
+	tgArn := "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/app-r1/abc"
+	state := &resources.DesiredState{
+		Manifest: &config.Manifest{Name: "app"},
+		TargetGroups: map[string]*resources.TargetGroupResource{
+			"app-r1": {
+				Name:   "app-r1",
+				Arn:    tgArn,
+				Action: resources.TargetGroupActionDelete,
+			},
+		},
+		ListenerRules: []*resources.ListenerRuleResource{
+			{
+				Priority:       1,
+				TargetGroupArn: tgArn,
+				Action:         resources.ListenerRuleActionNoop,
+			},
+		},
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	// Find listener rule entry - it should have been propagated to DELETE
+	var ruleEntry *diff.DiffEntry
+	for i := range plan.Entries {
+		if plan.Entries[i].Resource == "ListenerRule" {
+			ruleEntry = &plan.Entries[i]
+			break
+		}
+	}
+
+	if ruleEntry == nil {
+		t.Fatal("ListenerRule entry not found")
+	}
+
+	if ruleEntry.Type != diff.DiffTypeDelete {
+		t.Errorf("expected ListenerRule type DELETE, got %s", ruleEntry.Type)
+	}
+
+	if ruleEntry.PropagationReason == "" {
+		t.Error("expected PropagationReason to be set")
+	}
+}
+
+func TestPlanner_GeneratePlan_PropagatesTaskDefUpdate(t *testing.T) {
+	state := &resources.DesiredState{
+		Manifest: &config.Manifest{Name: "app"},
+		TaskDefs: map[string]*resources.TaskDefResource{
+			"web": {
+				Name:   "web",
+				Action: resources.TaskDefActionUpdate,
+				Desired: &config.TaskDefinition{
+					Family: "app-web",
+					CPU:    "512",
+				},
+			},
+		},
+		Services: map[string]*resources.ServiceResource{
+			"api": {
+				Name:   "api",
+				Action: resources.ServiceActionNoop,
+				Desired: &config.Service{
+					Name:           "api",
+					TaskDefinition: "web",
+				},
+			},
+		},
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	// Find service entry - it should have been propagated to UPDATE
+	var svcEntry *diff.DiffEntry
+	for i := range plan.Entries {
+		if plan.Entries[i].Resource == "Service" && plan.Entries[i].Name == "api" {
+			svcEntry = &plan.Entries[i]
+			break
+		}
+	}
+
+	if svcEntry == nil {
+		t.Fatal("Service entry not found")
+	}
+
+	if svcEntry.Type != diff.DiffTypeUpdate {
+		t.Errorf("expected Service type UPDATE due to TaskDef change, got %s", svcEntry.Type)
+	}
+
+	if svcEntry.PropagationReason == "" {
+		t.Error("expected PropagationReason to be set for propagated change")
+	}
+}
+
+func TestPlanner_GeneratePlan_NoPropagationForNoops(t *testing.T) {
+	state := &resources.DesiredState{
+		Manifest: &config.Manifest{Name: "app"},
+		TaskDefs: map[string]*resources.TaskDefResource{
+			"web": {
+				Name:    "web",
+				Action:  resources.TaskDefActionNoop,
+				Desired: &config.TaskDefinition{Family: "app-web"},
+			},
+		},
+		Services: map[string]*resources.ServiceResource{
+			"api": {
+				Name:   "api",
+				Action: resources.ServiceActionNoop,
+				Desired: &config.Service{
+					Name:           "api",
+					TaskDefinition: "web",
+				},
+			},
+		},
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	// Service should remain NOOP since TaskDef is NOOP
+	var svcEntry *diff.DiffEntry
+	for i := range plan.Entries {
+		if plan.Entries[i].Resource == "Service" && plan.Entries[i].Name == "api" {
+			svcEntry = &plan.Entries[i]
+			break
+		}
+	}
+
+	if svcEntry == nil {
+		t.Fatal("Service entry not found")
+	}
+
+	if svcEntry.Type != diff.DiffTypeNoop {
+		t.Errorf("expected Service type NOOP when TaskDef is NOOP, got %s", svcEntry.Type)
+	}
+}

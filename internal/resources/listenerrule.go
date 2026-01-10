@@ -24,13 +24,14 @@ const (
 )
 
 type ListenerRuleResource struct {
-	Priority       int
-	Desired        *config.IngressRule
-	Current        *types.Rule
-	Action         ListenerRuleAction
-	ListenerArn    string
-	TargetGroupArn string // Resolved ARN for service backends
-	Arn            string
+	Priority          int
+	Desired           *config.IngressRule
+	Current           *types.Rule
+	Action            ListenerRuleAction
+	ListenerArn       string
+	TargetGroupArn    string // Resolved ARN for service backends
+	Arn               string
+	PropagationReason string // Set when action was propagated from dependency
 }
 
 type ListenerRuleManager struct {

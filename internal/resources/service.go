@@ -45,6 +45,9 @@ type ServiceResource struct {
 	// Recreate tracking - fields that changed and force recreation
 	RecreateReasons []string
 
+	// Propagation reason when action was set due to dependency change
+	PropagationReason string
+
 	// Auto-scaling state
 	CurrentAutoScaling *CurrentAutoScalingState
 	AutoScalingAction  AutoScalingAction

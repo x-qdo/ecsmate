@@ -31,6 +31,7 @@ type ScheduledTaskResource struct {
 
 	TaskDefinitionArn string
 	RoleArn           string
+	PropagationReason string // Set when action was propagated from dependency
 }
 
 func (r *ScheduledTaskResource) ScheduleExpression() string {
