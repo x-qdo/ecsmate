@@ -738,12 +738,18 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 }
 
 type ScheduledTaskView struct {
-	TaskDefinition     string             `json:"taskDefinition"`
-	Cluster            string             `json:"cluster"`
-	ScheduleExpression string             `json:"scheduleExpression"`
-	TaskCount          int                `json:"taskCount"`
-	Timezone           string             `json:"timezone,omitempty"`
-	NetworkConfig      *NetworkConfigView `json:"networkConfiguration,omitempty"`
+	TaskDefinition     string                    `json:"taskDefinition"`
+	Cluster            string                    `json:"cluster"`
+	ScheduleExpression string                    `json:"scheduleExpression"`
+	TaskCount          int                       `json:"taskCount"`
+	Timezone           string                    `json:"timezone,omitempty"`
+	LaunchType         string                    `json:"launchType,omitempty"`
+	PlatformVersion    string                    `json:"platformVersion,omitempty"`
+	Group              string                    `json:"group,omitempty"`
+	NetworkConfig      *NetworkConfigView        `json:"networkConfiguration,omitempty"`
+	Tags               []ScheduledTaskTagView    `json:"tags,omitempty"`
+	DeadLetterConfig   *DeadLetterConfigView     `json:"deadLetterConfig,omitempty"`
+	RetryPolicy        *ScheduledRetryPolicyView `json:"retryPolicy,omitempty"`
 }
 
 func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTaskView {
@@ -756,6 +762,9 @@ func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTask
 		view.Cluster = task.Desired.Cluster
 		view.TaskCount = task.Desired.TaskCount
 		view.Timezone = task.Desired.Timezone
+		view.LaunchType = task.Desired.LaunchType
+		view.PlatformVersion = task.Desired.PlatformVersion
+		view.Group = task.Desired.Group
 
 		if task.Desired.NetworkConfiguration != nil {
 			view.NetworkConfig = &NetworkConfigView{
@@ -764,9 +773,59 @@ func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTask
 				AssignPublicIp: task.Desired.NetworkConfiguration.AssignPublicIp,
 			}
 		}
+
+		if len(task.Desired.Tags) > 0 {
+			view.Tags = buildScheduledTaskTagsView(task.Desired.Tags)
+		}
+
+		if task.Desired.DeadLetterConfig != nil && task.Desired.DeadLetterConfig.Arn != "" {
+			view.DeadLetterConfig = &DeadLetterConfigView{
+				Arn: task.Desired.DeadLetterConfig.Arn,
+			}
+		}
+
+		if task.Desired.RetryPolicy != nil {
+			view.RetryPolicy = &ScheduledRetryPolicyView{
+				MaximumEventAgeInSeconds: task.Desired.RetryPolicy.MaximumEventAgeInSeconds,
+				MaximumRetryAttempts:     task.Desired.RetryPolicy.MaximumRetryAttempts,
+			}
+		}
 	}
 
 	return view
+}
+
+type ScheduledTaskTagView struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type DeadLetterConfigView struct {
+	Arn string `json:"arn"`
+}
+
+type ScheduledRetryPolicyView struct {
+	MaximumEventAgeInSeconds int `json:"maximumEventAgeInSeconds,omitempty"`
+	MaximumRetryAttempts     int `json:"maximumRetryAttempts,omitempty"`
+}
+
+func buildScheduledTaskTagsView(tags []config.Tag) []ScheduledTaskTagView {
+	sorted := make([]ScheduledTaskTagView, 0, len(tags))
+	for _, tag := range tags {
+		if tag.Key == "" {
+			continue
+		}
+		sorted = append(sorted, ScheduledTaskTagView{
+			Key:   tag.Key,
+			Value: tag.Value,
+		})
+	}
+
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Key < sorted[j].Key
+	})
+
+	return sorted
 }
 
 type TargetGroupView struct {

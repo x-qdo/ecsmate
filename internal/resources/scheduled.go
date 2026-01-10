@@ -67,6 +67,9 @@ func (r *ScheduledTaskResource) ToCreateInput(groupName string) (*scheduler.Crea
 	if task.PlatformVersion != "" {
 		ecsParams.PlatformVersion = aws.String(task.PlatformVersion)
 	}
+	if task.Group != "" {
+		ecsParams.Group = aws.String(task.Group)
+	}
 
 	if task.NetworkConfiguration != nil {
 		ecsParams.NetworkConfiguration = &types.NetworkConfiguration{
@@ -81,9 +84,20 @@ func (r *ScheduledTaskResource) ToCreateInput(groupName string) (*scheduler.Crea
 	}
 
 	target := &types.Target{
-		Arn:     aws.String(fmt.Sprintf("arn:aws:ecs:%s:cluster/%s", getRegionFromCluster(task.Cluster), task.Cluster)),
-		RoleArn: aws.String(r.RoleArn),
+		Arn:           aws.String(fmt.Sprintf("arn:aws:ecs:%s:cluster/%s", getRegionFromCluster(task.Cluster), task.Cluster)),
+		RoleArn:       aws.String(r.RoleArn),
 		EcsParameters: ecsParams,
+	}
+	if task.DeadLetterConfig != nil && task.DeadLetterConfig.Arn != "" {
+		target.DeadLetterConfig = &types.DeadLetterConfig{
+			Arn: aws.String(task.DeadLetterConfig.Arn),
+		}
+	}
+	if task.RetryPolicy != nil {
+		target.RetryPolicy = &types.RetryPolicy{
+			MaximumEventAgeInSeconds: aws.Int32(int32(task.RetryPolicy.MaximumEventAgeInSeconds)),
+			MaximumRetryAttempts:     aws.Int32(int32(task.RetryPolicy.MaximumRetryAttempts)),
+		}
 	}
 
 	input := &scheduler.CreateScheduleInput{
@@ -123,6 +137,9 @@ func (r *ScheduledTaskResource) ToUpdateInput(groupName string) (*scheduler.Upda
 	if task.PlatformVersion != "" {
 		ecsParams.PlatformVersion = aws.String(task.PlatformVersion)
 	}
+	if task.Group != "" {
+		ecsParams.Group = aws.String(task.Group)
+	}
 
 	if task.NetworkConfiguration != nil {
 		ecsParams.NetworkConfiguration = &types.NetworkConfiguration{
@@ -140,6 +157,17 @@ func (r *ScheduledTaskResource) ToUpdateInput(groupName string) (*scheduler.Upda
 		Arn:           aws.String(fmt.Sprintf("arn:aws:ecs:%s:cluster/%s", getRegionFromCluster(task.Cluster), task.Cluster)),
 		RoleArn:       aws.String(r.RoleArn),
 		EcsParameters: ecsParams,
+	}
+	if task.DeadLetterConfig != nil && task.DeadLetterConfig.Arn != "" {
+		target.DeadLetterConfig = &types.DeadLetterConfig{
+			Arn: aws.String(task.DeadLetterConfig.Arn),
+		}
+	}
+	if task.RetryPolicy != nil {
+		target.RetryPolicy = &types.RetryPolicy{
+			MaximumEventAgeInSeconds: aws.Int32(int32(task.RetryPolicy.MaximumEventAgeInSeconds)),
+			MaximumRetryAttempts:     aws.Int32(int32(task.RetryPolicy.MaximumRetryAttempts)),
+		}
 	}
 
 	input := &scheduler.UpdateScheduleInput{
@@ -225,7 +253,11 @@ func (m *ScheduledTaskManager) Create(ctx context.Context, resource *ScheduledTa
 		return err
 	}
 
-	return m.schedulerClient.CreateSchedule(ctx, input)
+	if err := m.schedulerClient.CreateSchedule(ctx, input); err != nil {
+		return err
+	}
+
+	return m.applyScheduleTags(ctx, resource)
 }
 
 func (m *ScheduledTaskManager) Update(ctx context.Context, resource *ScheduledTaskResource) error {
@@ -234,7 +266,11 @@ func (m *ScheduledTaskManager) Update(ctx context.Context, resource *ScheduledTa
 		return err
 	}
 
-	return m.schedulerClient.UpdateSchedule(ctx, input)
+	if err := m.schedulerClient.UpdateSchedule(ctx, input); err != nil {
+		return err
+	}
+
+	return m.applyScheduleTags(ctx, resource)
 }
 
 func (m *ScheduledTaskManager) Delete(ctx context.Context, resource *ScheduledTaskResource) error {
@@ -255,6 +291,63 @@ func (m *ScheduledTaskManager) Apply(ctx context.Context, resource *ScheduledTas
 	default:
 		return fmt.Errorf("unknown action: %s", resource.Action)
 	}
+}
+
+func (m *ScheduledTaskManager) applyScheduleTags(ctx context.Context, resource *ScheduledTaskResource) error {
+	if resource == nil || resource.Desired == nil {
+		return nil
+	}
+	if len(resource.Desired.Tags) == 0 {
+		return nil
+	}
+
+	schedule, err := m.schedulerClient.GetSchedule(ctx, resource.Name, m.groupName)
+	if err != nil {
+		return err
+	}
+	arn := aws.ToString(schedule.Arn)
+	if arn == "" {
+		return nil
+	}
+
+	currentTags, err := m.schedulerClient.ListTagsForResource(ctx, arn)
+	if err != nil {
+		return err
+	}
+
+	desiredTags := make(map[string]string, len(resource.Desired.Tags))
+	for _, tag := range resource.Desired.Tags {
+		if tag.Key == "" {
+			continue
+		}
+		desiredTags[tag.Key] = tag.Value
+	}
+
+	var addTags []types.Tag
+	for key, value := range desiredTags {
+		if current, ok := currentTags[key]; !ok || current != value {
+			addTags = append(addTags, types.Tag{
+				Key:   aws.String(key),
+				Value: aws.String(value),
+			})
+		}
+	}
+
+	var removeKeys []string
+	for key := range currentTags {
+		if _, ok := desiredTags[key]; !ok {
+			removeKeys = append(removeKeys, key)
+		}
+	}
+
+	if err := m.schedulerClient.TagResource(ctx, arn, addTags); err != nil {
+		return err
+	}
+	if err := m.schedulerClient.UntagResource(ctx, arn, removeKeys); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func getRegionFromCluster(cluster string) string {

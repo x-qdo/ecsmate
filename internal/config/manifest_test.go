@@ -488,6 +488,19 @@ func TestParseManifest_ScheduledTasks(t *testing.T) {
 				taskDefinition: "cron"
 				cluster: "prod-cluster"
 				taskCount: 1
+				platformVersion: "1.4.0"
+				group: "reporting"
+				tags: [
+					{ key: "env", value: "prod" },
+					{ key: "team", value: "data" },
+				]
+				deadLetterConfig: {
+					arn: "arn:aws:sqs:us-east-1:123456789012:dlq"
+				}
+				retryPolicy: {
+					maximumEventAgeInSeconds: 120
+					maximumRetryAttempts: 3
+				}
 				schedule: {
 					type: "cron"
 					expression: "0 2 * * ? *"
@@ -540,6 +553,21 @@ func TestParseManifest_ScheduledTasks(t *testing.T) {
 	}
 	if daily.Timezone != "America/New_York" {
 		t.Errorf("expected timezone 'America/New_York', got '%s'", daily.Timezone)
+	}
+	if daily.PlatformVersion != "1.4.0" {
+		t.Errorf("expected platformVersion '1.4.0', got '%s'", daily.PlatformVersion)
+	}
+	if daily.Group != "reporting" {
+		t.Errorf("expected group 'reporting', got '%s'", daily.Group)
+	}
+	if len(daily.Tags) != 2 {
+		t.Errorf("expected 2 tags, got %d", len(daily.Tags))
+	}
+	if daily.DeadLetterConfig == nil || daily.DeadLetterConfig.Arn == "" {
+		t.Errorf("expected deadLetterConfig arn to be set")
+	}
+	if daily.RetryPolicy == nil || daily.RetryPolicy.MaximumRetryAttempts != 3 {
+		t.Errorf("expected retryPolicy maximumRetryAttempts 3")
 	}
 
 	hourly := manifest.ScheduledTasks["hourlySync"]
