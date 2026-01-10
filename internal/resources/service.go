@@ -421,20 +421,22 @@ func (resource *ServiceResource) loadBalancersChanged() bool {
 		return true
 	}
 
-	// Build map of current LBs for comparison
-	currentLBs := make(map[string]bool)
+	// Build map of current LBs by container identity (name:port) -> arn
+	currentLBs := make(map[string]string)
 	for _, lb := range current.LoadBalancers {
-		key := fmt.Sprintf("%s:%s:%d",
-			aws.ToString(lb.TargetGroupArn),
-			aws.ToString(lb.ContainerName),
-			aws.ToInt32(lb.ContainerPort))
-		currentLBs[key] = true
+		key := fmt.Sprintf("%s:%d", aws.ToString(lb.ContainerName), aws.ToInt32(lb.ContainerPort))
+		currentLBs[key] = aws.ToString(lb.TargetGroupArn)
 	}
 
-	// Check if all desired LBs exist in current
+	// Check if all desired LBs exist in current with matching identity
 	for _, lb := range desired.LoadBalancers {
-		key := fmt.Sprintf("%s:%s:%d", lb.TargetGroupArn, lb.ContainerName, lb.ContainerPort)
-		if !currentLBs[key] {
+		key := fmt.Sprintf("%s:%d", lb.ContainerName, lb.ContainerPort)
+		currentArn, exists := currentLBs[key]
+		if !exists {
+			return true
+		}
+		// Only compare ARN if desired has one (might not be resolved yet from ingress)
+		if lb.TargetGroupArn != "" && lb.TargetGroupArn != currentArn {
 			return true
 		}
 	}

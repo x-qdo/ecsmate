@@ -956,6 +956,94 @@ func TestServiceResource_Validate_InvalidLoadBalancer(t *testing.T) {
 	}
 }
 
+func TestServiceResource_LoadBalancersChanged_UnresolvedARN(t *testing.T) {
+	// When desired LB has empty ARN (not resolved from ingress) but same container identity,
+	// should return false - not trigger unnecessary RECREATE
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			LoadBalancers: []config.LoadBalancer{
+				{
+					TargetGroupArn: "", // Not resolved yet from ingress rules
+					ContainerName:  "app",
+					ContainerPort:  8080,
+				},
+			},
+		},
+		Current: &types.Service{
+			LoadBalancers: []types.LoadBalancer{
+				{
+					TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:...:existing-tg"),
+					ContainerName:  aws.String("app"),
+					ContainerPort:  aws.Int32(8080),
+				},
+			},
+		},
+	}
+
+	if resource.loadBalancersChanged() {
+		t.Error("expected load balancers to be considered unchanged when ARN is unresolved but container identity matches")
+	}
+}
+
+func TestServiceResource_LoadBalancersChanged_DifferentContainerIdentity(t *testing.T) {
+	// When container identity differs, should detect as change even if ARN is empty
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			LoadBalancers: []config.LoadBalancer{
+				{
+					TargetGroupArn: "",
+					ContainerName:  "new-app", // Different container name
+					ContainerPort:  8080,
+				},
+			},
+		},
+		Current: &types.Service{
+			LoadBalancers: []types.LoadBalancer{
+				{
+					TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:...:existing-tg"),
+					ContainerName:  aws.String("app"),
+					ContainerPort:  aws.Int32(8080),
+				},
+			},
+		},
+	}
+
+	if !resource.loadBalancersChanged() {
+		t.Error("expected load balancers to be considered changed when container identity differs")
+	}
+}
+
+func TestServiceResource_LoadBalancersChanged_ExplicitARNChange(t *testing.T) {
+	// When desired has explicit different ARN, should detect as change
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			LoadBalancers: []config.LoadBalancer{
+				{
+					TargetGroupArn: "arn:aws:elasticloadbalancing:...:new-tg", // Explicit different ARN
+					ContainerName:  "app",
+					ContainerPort:  8080,
+				},
+			},
+		},
+		Current: &types.Service{
+			LoadBalancers: []types.LoadBalancer{
+				{
+					TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:...:old-tg"),
+					ContainerName:  aws.String("app"),
+					ContainerPort:  aws.Int32(8080),
+				},
+			},
+		},
+	}
+
+	if !resource.loadBalancersChanged() {
+		t.Error("expected load balancers to be considered changed when ARN explicitly differs")
+	}
+}
+
 func TestServiceResource_Validate_InvalidServiceRegistry(t *testing.T) {
 	resource := &ServiceResource{
 		Name: "web",

@@ -47,7 +47,9 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 	return plan
 }
 
-// applyPropagatedChanges applies propagated changes from the DAG to the resource state
+// applyPropagatedChanges applies propagated changes from the DAG to the resource state.
+// For ListenerRules, suppresses propagation only when there are no actual config changes
+// AND the propagation isn't due to a recreation (which always requires update for new ARN).
 func applyPropagatedChanges(state *resources.DesiredState, changes map[string]*Change) {
 	for nodeID, change := range changes {
 		if change.Reason == "" {
@@ -63,18 +65,28 @@ func applyPropagatedChanges(state *resources.DesiredState, changes map[string]*C
 		switch nodeType {
 		case "Service":
 			if svc, ok := state.Services[nodeName]; ok && svc.Action == resources.ServiceActionNoop {
+				// Services always need update when dependency changes (new task def revision, etc.)
 				svc.Action = serviceActionFromString(change.Action)
 				svc.PropagationReason = change.Reason
 			}
 		case "ListenerRule":
 			for _, rule := range state.ListenerRules {
 				if fmt.Sprintf("priority-%d", rule.Priority) == nodeName && rule.Action == resources.ListenerRuleActionNoop {
-					rule.Action = listenerRuleActionFromString(change.Action)
-					rule.PropagationReason = change.Reason
+					// Always propagate if:
+					// - Change is DELETE (rule must be deleted with its target group)
+					// - Change is due to recreation (new ARN will be assigned)
+					// Only suppress if there are no config changes AND it's a simple update
+					isDelete := change.Action == "DELETE"
+					isRecreation := strings.Contains(change.Reason, "recreated")
+					if isDelete || isRecreation || rule.HasConfigChanges() {
+						rule.Action = listenerRuleActionFromString(change.Action)
+						rule.PropagationReason = change.Reason
+					}
 				}
 			}
 		case "ScheduledTask":
 			if task, ok := state.ScheduledTasks[nodeName]; ok && task.Action == resources.ScheduledTaskActionNoop {
+				// ScheduledTasks always need update when task def changes
 				task.Action = scheduledTaskActionFromString(change.Action)
 				task.PropagationReason = change.Reason
 			}
@@ -698,11 +710,7 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 			lb := &view.LoadBalancers[i]
 			if lb.ContainerName == containerName && lb.ContainerPort == containerPort {
 				if lb.TargetGroupArn == "" {
-					if arn := resolveTargetGroupArn(targetGroups, manifestName, rule.Priority); arn != "" {
-						lb.TargetGroupArn = arn
-					} else {
-						lb.TargetGroupArn = pendingTargetGroupArn
-					}
+					lb.TargetGroupArn = resolveTargetGroupArnForView(targetGroups, manifestName, rule.Priority)
 				}
 				updated = true
 				break
@@ -710,12 +718,8 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 		}
 
 		if !updated {
-			targetGroupArn := resolveTargetGroupArn(targetGroups, manifestName, rule.Priority)
-			if targetGroupArn == "" {
-				targetGroupArn = pendingTargetGroupArn
-			}
 			view.LoadBalancers = append(view.LoadBalancers, LoadBalancerView{
-				TargetGroupArn: targetGroupArn,
+				TargetGroupArn: resolveTargetGroupArnForView(targetGroups, manifestName, rule.Priority),
 				ContainerName:  containerName,
 				ContainerPort:  containerPort,
 			})
@@ -736,6 +740,37 @@ func resolveTargetGroupArn(targetGroups map[string]*resources.TargetGroupResourc
 	}
 
 	return ""
+}
+
+// resolveTargetGroupArnForView returns the ARN for diff view display.
+// Returns placeholder only when TG is being created or recreated (new ARN will be assigned).
+// For existing TGs (NOOP/UPDATE), returns the existing ARN.
+func resolveTargetGroupArnForView(targetGroups map[string]*resources.TargetGroupResource, manifestName string, priority int) string {
+	if targetGroups == nil || manifestName == "" || priority == 0 {
+		return pendingTargetGroupArn
+	}
+
+	targetGroupName := fmt.Sprintf("%s-r%d", manifestName, priority)
+	for _, tg := range targetGroups {
+		if tg == nil || tg.Name != targetGroupName {
+			continue
+		}
+
+		switch tg.Action {
+		case resources.TargetGroupActionCreate:
+			return pendingTargetGroupArn
+		case resources.TargetGroupActionRecreate:
+			return pendingTargetGroupArn
+		default:
+			// NOOP, UPDATE, DELETE - use existing ARN
+			if tg.Arn != "" {
+				return tg.Arn
+			}
+			return pendingTargetGroupArn
+		}
+	}
+
+	return pendingTargetGroupArn
 }
 
 func manifestName(state *resources.DesiredState) string {

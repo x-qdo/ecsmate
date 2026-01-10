@@ -844,6 +844,146 @@ func TestPlanner_GeneratePlan_PropagatesTaskDefUpdate(t *testing.T) {
 	}
 }
 
+func TestResolveTargetGroupArnForView_ExistingNoop(t *testing.T) {
+	// When TG exists with NOOP action, should return its existing ARN
+	targetGroups := map[string]*resources.TargetGroupResource{
+		"rule-0": {
+			Name:   "cal-r101",
+			Arn:    "arn:aws:elasticloadbalancing:eu-west-1:123456789:targetgroup/cal-r101/abc123",
+			Action: resources.TargetGroupActionNoop,
+		},
+	}
+
+	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+
+	if arn != "arn:aws:elasticloadbalancing:eu-west-1:123456789:targetgroup/cal-r101/abc123" {
+		t.Errorf("expected existing ARN, got %q", arn)
+	}
+}
+
+func TestResolveTargetGroupArnForView_CreateAction(t *testing.T) {
+	// When TG is being created, should return placeholder
+	targetGroups := map[string]*resources.TargetGroupResource{
+		"rule-0": {
+			Name:   "cal-r101",
+			Arn:    "", // No ARN yet
+			Action: resources.TargetGroupActionCreate,
+		},
+	}
+
+	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+
+	if arn != pendingTargetGroupArn {
+		t.Errorf("expected placeholder for CREATE action, got %q", arn)
+	}
+}
+
+func TestResolveTargetGroupArnForView_RecreateAction(t *testing.T) {
+	// When TG is being recreated, should return placeholder (new ARN after recreation)
+	targetGroups := map[string]*resources.TargetGroupResource{
+		"rule-0": {
+			Name:   "cal-r101",
+			Arn:    "arn:aws:elasticloadbalancing:eu-west-1:123456789:targetgroup/cal-r101/oldarn",
+			Action: resources.TargetGroupActionRecreate,
+		},
+	}
+
+	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+
+	if arn != pendingTargetGroupArn {
+		t.Errorf("expected placeholder for RECREATE action, got %q", arn)
+	}
+}
+
+func TestResolveTargetGroupArnForView_UpdateAction(t *testing.T) {
+	// When TG is being updated (not recreated), should return existing ARN
+	targetGroups := map[string]*resources.TargetGroupResource{
+		"rule-0": {
+			Name:   "cal-r101",
+			Arn:    "arn:aws:elasticloadbalancing:eu-west-1:123456789:targetgroup/cal-r101/abc123",
+			Action: resources.TargetGroupActionUpdate,
+		},
+	}
+
+	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+
+	if arn != "arn:aws:elasticloadbalancing:eu-west-1:123456789:targetgroup/cal-r101/abc123" {
+		t.Errorf("expected existing ARN for UPDATE action, got %q", arn)
+	}
+}
+
+func TestPlanner_GeneratePlan_ListenerRuleUpdateOnRecreate(t *testing.T) {
+	// When TargetGroup is RECREATE, ListenerRule MUST be updated even if config matches
+	// because it needs the new ARN after recreation
+	tgArn := "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/app-r1/abc"
+	state := &resources.DesiredState{
+		Manifest: &config.Manifest{Name: "app"},
+		TargetGroups: map[string]*resources.TargetGroupResource{
+			"app-r1": {
+				Name:            "app-r1",
+				Arn:             tgArn,
+				Action:          resources.TargetGroupActionRecreate,
+				RecreateReasons: []string{"port changed"},
+			},
+		},
+		ListenerRules: []*resources.ListenerRuleResource{
+			{
+				Priority:       1,
+				TargetGroupArn: tgArn,
+				Action:         resources.ListenerRuleActionNoop,
+				Desired: &config.IngressRule{
+					Priority: 1,
+					Host:     "example.com",
+					Service: &config.IngressServiceBackend{
+						Name:          "web",
+						ContainerName: "app",
+						ContainerPort: 80,
+					},
+				},
+				Current: &elbv2types.Rule{
+					Priority: aws.String("1"),
+					Conditions: []elbv2types.RuleCondition{
+						{
+							Field: aws.String("host-header"),
+							HostHeaderConfig: &elbv2types.HostHeaderConditionConfig{
+								Values: []string{"example.com"},
+							},
+						},
+					},
+					Actions: []elbv2types.Action{
+						{
+							Type:           elbv2types.ActionTypeEnumForward,
+							TargetGroupArn: aws.String(tgArn),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	// Find listener rule entry - it should be UPDATE due to TargetGroup recreation
+	var ruleEntry *diff.DiffEntry
+	for i := range plan.Entries {
+		if plan.Entries[i].Resource == "ListenerRule" {
+			ruleEntry = &plan.Entries[i]
+			break
+		}
+	}
+
+	if ruleEntry == nil {
+		t.Fatal("ListenerRule entry not found")
+	}
+
+	// ListenerRule should be UPDATE because TargetGroup is being recreated
+	// and it will need the new ARN
+	if ruleEntry.Type != diff.DiffTypeUpdate {
+		t.Errorf("expected ListenerRule type UPDATE when TargetGroup is recreated, got %s", ruleEntry.Type)
+	}
+}
+
 func TestPlanner_GeneratePlan_NoPropagationForNoops(t *testing.T) {
 	state := &resources.DesiredState{
 		Manifest: &config.Manifest{Name: "app"},

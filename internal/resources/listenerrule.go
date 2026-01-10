@@ -48,19 +48,23 @@ func (m *ListenerRuleManager) DescribeExistingRules(ctx context.Context, listene
 	return m.client.DescribeListenerRules(ctx, listenerArn)
 }
 
-func (m *ListenerRuleManager) BuildResources(ctx context.Context, listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string) ([]*ListenerRuleResource, error) {
+func (m *ListenerRuleManager) BuildResources(ctx context.Context, listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, manifestName string) ([]*ListenerRuleResource, error) {
 	existingRules, err := m.client.DescribeListenerRules(ctx, listenerArn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe listener rules: %w", err)
 	}
 
-	return m.BuildResourcesWithExisting(listenerArn, rules, targetGroupArns, existingRules), nil
+	return m.BuildResourcesWithExisting(listenerArn, rules, targetGroupArns, existingRules, manifestName), nil
 }
 
-func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, existingRules []types.Rule) []*ListenerRuleResource {
-	matches := matchExistingListenerRules(rules, existingRules)
+// BuildResourcesWithExisting builds listener rule resources with manifest name for ownership filtering.
+// When manifestName is provided, only rules whose target groups belong to this manifest are marked for deletion.
+func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, existingRules []types.Rule, manifestName string) []*ListenerRuleResource {
+	matches, usedArns := matchExistingListenerRulesWithUsed(rules, existingRules)
 
 	var resources []*ListenerRuleResource
+
+	// Build resources for desired rules
 	for i := range rules {
 		rule := &rules[i]
 		resource := &ListenerRuleResource{
@@ -85,7 +89,74 @@ func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rul
 		resources = append(resources, resource)
 	}
 
+	// Build DELETE resources for orphaned rules (exist in AWS but not in manifest)
+	// Only delete rules whose target groups belong to this manifest
+	for i := range existingRules {
+		existing := &existingRules[i]
+		arn := aws.ToString(existing.RuleArn)
+		if arn == "" || usedArns[arn] {
+			continue // Skip matched rules
+		}
+
+		// Skip default rule
+		priority := aws.ToString(existing.Priority)
+		if priority == "default" {
+			continue
+		}
+
+		tgArn := extractTargetGroupArn(existing)
+		tgName := extractTargetGroupName(tgArn)
+
+		// Skip rules whose target groups don't belong to this manifest
+		if manifestName != "" && tgArn != "" && !isListenerRuleOwnedByManifest(tgName, manifestName) {
+			continue
+		}
+
+		priorityInt := 0
+		fmt.Sscanf(priority, "%d", &priorityInt)
+
+		resource := &ListenerRuleResource{
+			Priority:       priorityInt,
+			Desired:        nil, // No desired state = delete
+			Current:        existing,
+			Arn:            arn,
+			ListenerArn:    listenerArn,
+			TargetGroupArn: tgArn,
+		}
+		resource.determineAction()
+		resources = append(resources, resource)
+	}
+
 	return resources
+}
+
+// isListenerRuleOwnedByManifest checks if a listener rule's target group belongs to the manifest.
+// TG naming convention: {manifestName}-r{priority}
+func isListenerRuleOwnedByManifest(tgName, manifestName string) bool {
+	if manifestName == "" {
+		return true // No filtering if manifest name not provided
+	}
+	if tgName == "" {
+		return false // Can't determine ownership without TG name
+	}
+
+	// Pattern: {manifestName}-r{number}
+	prefix := manifestName + "-r"
+	if !strings.HasPrefix(tgName, prefix) {
+		return false
+	}
+
+	// Check that what follows is a number
+	suffix := tgName[len(prefix):]
+	if suffix == "" {
+		return false
+	}
+	for _, c := range suffix {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (resource *ListenerRuleResource) determineAction() {
@@ -136,20 +207,26 @@ func (resource *ListenerRuleResource) configChanged() bool {
 	}
 }
 
+// HasConfigChanges returns true if the resource has actual configuration changes.
+// This is used to verify propagated actions have real changes to apply.
+func (resource *ListenerRuleResource) HasConfigChanges() bool {
+	return resource.configChanged()
+}
+
 func actionForwardMatches(rule *types.Rule, targetGroupArn string) bool {
 	if rule == nil {
 		return false
 	}
+
+	currentArn := extractTargetGroupArn(rule)
+
+	// If desired ARN is empty but current exists, no change needed
+	// (ARN will be resolved during apply from the existing rule)
 	if targetGroupArn == "" {
-		return false
+		return currentArn != ""
 	}
-	for _, action := range rule.Actions {
-		if action.Type != types.ActionTypeEnumForward {
-			continue
-		}
-		return extractTargetGroupArn(rule) == targetGroupArn
-	}
-	return false
+
+	return currentArn == targetGroupArn
 }
 
 func actionRedirectMatches(rule *types.Rule, desired *config.IngressRedirect) bool {
@@ -402,7 +479,7 @@ func (m *ListenerRuleManager) buildRuleActions(rule *config.IngressRule, targetG
 	return result
 }
 
-func matchExistingListenerRules(desired []config.IngressRule, existing []types.Rule) map[int]*types.Rule {
+func matchExistingListenerRulesWithUsed(desired []config.IngressRule, existing []types.Rule) (map[int]*types.Rule, map[string]bool) {
 	matches := make(map[int]*types.Rule)
 	used := make(map[string]bool)
 	existingByPriority := make(map[int]*types.Rule)
@@ -440,7 +517,7 @@ func matchExistingListenerRules(desired []config.IngressRule, existing []types.R
 		}
 	}
 
-	return matches
+	return matches, used
 }
 
 func findRuleByConditions(desired *config.IngressRule, existing []types.Rule, used map[string]bool) *types.Rule {
@@ -567,4 +644,20 @@ func extractTargetGroupArn(rule *types.Rule) string {
 	}
 
 	return ""
+}
+
+func extractRuleArn(rule *types.Rule) string {
+	if rule == nil {
+		return ""
+	}
+	return aws.ToString(rule.RuleArn)
+}
+
+func extractTargetGroupName(arn string) string {
+	// ARN format: arn:aws:elasticloadbalancing:region:account:targetgroup/name/id
+	parts := strings.Split(arn, "/")
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return arn
 }
