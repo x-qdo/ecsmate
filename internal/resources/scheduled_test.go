@@ -84,6 +84,14 @@ func TestScheduledTaskResource_ToCreateInput(t *testing.T) {
 			Timezone:           "America/New_York",
 			LaunchType:         "FARGATE",
 			PlatformVersion:    "1.4.0",
+			Group:              "reporting",
+			DeadLetterConfig: &config.DeadLetterConfig{
+				Arn: "arn:aws:sqs:us-east-1:123456789:dead-letter",
+			},
+			RetryPolicy: &config.RetryPolicy{
+				MaximumEventAgeInSeconds: 300,
+				MaximumRetryAttempts:     2,
+			},
 			NetworkConfiguration: &config.NetworkConfiguration{
 				Subnets:        []string{"subnet-1", "subnet-2"},
 				SecurityGroups: []string{"sg-1"},
@@ -132,6 +140,15 @@ func TestScheduledTaskResource_ToCreateInput(t *testing.T) {
 	if input.Target.EcsParameters.LaunchType != types.LaunchTypeFargate {
 		t.Errorf("expected launch type FARGATE, got %s", input.Target.EcsParameters.LaunchType)
 	}
+	if aws.ToString(input.Target.EcsParameters.Group) != "reporting" {
+		t.Errorf("expected group 'reporting', got '%s'", aws.ToString(input.Target.EcsParameters.Group))
+	}
+	if input.Target.DeadLetterConfig == nil || aws.ToString(input.Target.DeadLetterConfig.Arn) != "arn:aws:sqs:us-east-1:123456789:dead-letter" {
+		t.Errorf("expected dead letter ARN to be set")
+	}
+	if input.Target.RetryPolicy == nil || aws.ToInt32(input.Target.RetryPolicy.MaximumRetryAttempts) != 2 {
+		t.Errorf("expected retry policy maximum retry attempts 2")
+	}
 }
 
 func TestScheduledTaskResource_ToCreateInput_NoDesired(t *testing.T) {
@@ -155,6 +172,7 @@ func TestScheduledTaskResource_ToUpdateInput(t *testing.T) {
 			TaskCount:          2,
 			ScheduleType:       "rate",
 			ScheduleExpression: "30 minutes",
+			Group:              "sync-group",
 		},
 		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/sync:3",
 		RoleArn:           "arn:aws:iam::123456789:role/scheduler-role",
@@ -173,6 +191,9 @@ func TestScheduledTaskResource_ToUpdateInput(t *testing.T) {
 	}
 	if aws.ToInt32(input.Target.EcsParameters.TaskCount) != 2 {
 		t.Errorf("expected task count 2, got %d", aws.ToInt32(input.Target.EcsParameters.TaskCount))
+	}
+	if aws.ToString(input.Target.EcsParameters.Group) != "sync-group" {
+		t.Errorf("expected group 'sync-group', got '%s'", aws.ToString(input.Target.EcsParameters.Group))
 	}
 }
 

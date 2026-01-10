@@ -129,6 +129,7 @@ func collectFromService(svc *Service, refs map[string]struct{}) {
 
 func collectFromScheduledTask(st *ScheduledTask, refs map[string]struct{}) {
 	collectFromString(st.Cluster, refs)
+	collectFromString(st.Group, refs)
 	if st.NetworkConfiguration != nil {
 		for _, s := range st.NetworkConfiguration.Subnets {
 			collectFromString(s, refs)
@@ -140,6 +141,13 @@ func collectFromScheduledTask(st *ScheduledTask, refs map[string]struct{}) {
 	if st.Overrides != nil {
 		collectFromString(st.Overrides.TaskRoleArn, refs)
 		collectFromString(st.Overrides.ExecutionRoleArn, refs)
+	}
+	for _, tag := range st.Tags {
+		collectFromString(tag.Key, refs)
+		collectFromString(tag.Value, refs)
+	}
+	if st.DeadLetterConfig != nil {
+		collectFromString(st.DeadLetterConfig.Arn, refs)
 	}
 }
 
@@ -255,6 +263,7 @@ func replaceAndSplit(slice []string, values map[string]string) []string {
 
 func replaceInScheduledTask(st *ScheduledTask, values map[string]string) {
 	st.Cluster = replaceInString(st.Cluster, values)
+	st.Group = replaceInString(st.Group, values)
 	if st.NetworkConfiguration != nil {
 		st.NetworkConfiguration.Subnets = replaceAndSplit(st.NetworkConfiguration.Subnets, values)
 		st.NetworkConfiguration.SecurityGroups = replaceAndSplit(st.NetworkConfiguration.SecurityGroups, values)
@@ -262,6 +271,13 @@ func replaceInScheduledTask(st *ScheduledTask, values map[string]string) {
 	if st.Overrides != nil {
 		st.Overrides.TaskRoleArn = replaceInString(st.Overrides.TaskRoleArn, values)
 		st.Overrides.ExecutionRoleArn = replaceInString(st.Overrides.ExecutionRoleArn, values)
+	}
+	for i := range st.Tags {
+		st.Tags[i].Key = replaceInString(st.Tags[i].Key, values)
+		st.Tags[i].Value = replaceInString(st.Tags[i].Value, values)
+	}
+	if st.DeadLetterConfig != nil {
+		st.DeadLetterConfig.Arn = replaceInString(st.DeadLetterConfig.Arn, values)
 	}
 }
 

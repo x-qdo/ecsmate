@@ -75,12 +75,12 @@ func TestResolveSSMReferences(t *testing.T) {
 	ctx := context.Background()
 	resolver := &mockSSMResolver{
 		params: map[string]string{
-			"/app/role-arn":     "arn:aws:iam::123:role/MyRole",
-			"/app/cluster":      "production-cluster",
-			"/app/subnet-1":     "subnet-abc123",
-			"/app/sg-1":         "sg-def456",
-			"/app/image-tag":    "v1.2.3",
-			"/app/db-secret":    "arn:aws:secretsmanager:us-east-1:123:secret:db",
+			"/app/role-arn":  "arn:aws:iam::123:role/MyRole",
+			"/app/cluster":   "production-cluster",
+			"/app/subnet-1":  "subnet-abc123",
+			"/app/sg-1":      "sg-def456",
+			"/app/image-tag": "v1.2.3",
+			"/app/db-secret": "arn:aws:secretsmanager:us-east-1:123:secret:db",
 		},
 	}
 
@@ -255,12 +255,19 @@ func TestCollectSSMReferences_AllTypes(t *testing.T) {
 		ScheduledTasks: map[string]ScheduledTask{
 			"cron": {
 				Cluster: "{{ssm:/st/cluster}}",
+				Group:   "{{ssm:/st/group}}",
 				NetworkConfiguration: &NetworkConfiguration{
 					Subnets: []string{"{{ssm:/st/subnet}}"},
 				},
 				Overrides: &TaskOverrides{
 					TaskRoleArn:      "{{ssm:/st/task-role}}",
 					ExecutionRoleArn: "{{ssm:/st/exec-role}}",
+				},
+				Tags: []Tag{
+					{Key: "env", Value: "{{ssm:/st/tag-env}}"},
+				},
+				DeadLetterConfig: &DeadLetterConfig{
+					Arn: "{{ssm:/st/dlq}}",
 				},
 			},
 		},
@@ -273,7 +280,7 @@ func TestCollectSSMReferences_AllTypes(t *testing.T) {
 		"/merged/base", "/merged/exec-role", "/merged/image", "/merged/env",
 		"/remote/arn",
 		"/svc/cluster", "/svc/subnet", "/svc/sg", "/svc/tg",
-		"/st/cluster", "/st/subnet", "/st/task-role", "/st/exec-role",
+		"/st/cluster", "/st/group", "/st/subnet", "/st/task-role", "/st/exec-role", "/st/tag-env", "/st/dlq",
 	}
 
 	refMap := make(map[string]bool)

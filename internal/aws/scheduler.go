@@ -111,6 +111,56 @@ func (c *SchedulerClient) DeleteSchedule(ctx context.Context, name, groupName st
 	return nil
 }
 
+func (c *SchedulerClient) ListTagsForResource(ctx context.Context, arn string) (map[string]string, error) {
+	log.Debug("listing schedule tags", "arn", arn)
+
+	out, err := c.client.ListTagsForResource(ctx, &scheduler.ListTagsForResourceInput{
+		ResourceArn: aws.String(arn),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tags for %s: %w", arn, err)
+	}
+
+	tags := make(map[string]string)
+	for _, tag := range out.Tags {
+		key := aws.ToString(tag.Key)
+		tags[key] = aws.ToString(tag.Value)
+	}
+	return tags, nil
+}
+
+func (c *SchedulerClient) TagResource(ctx context.Context, arn string, tags []types.Tag) error {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	log.Debug("tagging schedule", "arn", arn, "count", len(tags))
+	_, err := c.client.TagResource(ctx, &scheduler.TagResourceInput{
+		ResourceArn: aws.String(arn),
+		Tags:        tags,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to tag %s: %w", arn, err)
+	}
+	return nil
+}
+
+func (c *SchedulerClient) UntagResource(ctx context.Context, arn string, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	log.Debug("untagging schedule", "arn", arn, "count", len(keys))
+	_, err := c.client.UntagResource(ctx, &scheduler.UntagResourceInput{
+		ResourceArn: aws.String(arn),
+		TagKeys:     keys,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to untag %s: %w", arn, err)
+	}
+	return nil
+}
+
 func (c *SchedulerClient) CreateScheduleGroup(ctx context.Context, name string) error {
 	log.Debug("creating schedule group", "name", name)
 

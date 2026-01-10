@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
@@ -10,6 +11,12 @@ import (
 	awsclient "github.com/qdo/ecsmate/internal/aws"
 	"github.com/qdo/ecsmate/internal/config"
 	"github.com/qdo/ecsmate/internal/log"
+)
+
+// Ownership tag keys used to identify resources managed by ecsmate
+const (
+	TagKeyManagedBy = "ManagedBy"
+	TagValueEcsmate = "ecsmate"
 )
 
 type DesiredState struct {
@@ -257,7 +264,7 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 		}
 	}
 
-	existingRuleMatches := matchExistingListenerRules(manifest.Ingress.Rules, existingRules)
+	existingRuleMatches, usedRuleArns := matchExistingListenerRulesWithUsed(manifest.Ingress.Rules, existingRules)
 	existingTargetGroupArns := make(map[int]string)
 	for idx, rule := range existingRuleMatches {
 		if rule == nil {
@@ -271,6 +278,7 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 	// Build target groups for rules with service backends
 	tgSpecs := ExtractTargetGroups(manifest, manifest.Name)
 	targetGroupArns := make(map[int]string)
+	usedTargetGroupArns := make(map[string]bool)
 
 	for key, spec := range tgSpecs {
 		log.Debug("building target group resource", "name", spec.Name)
@@ -285,13 +293,83 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 
 		if resource.Arn != "" {
 			targetGroupArns[spec.RuleIndex] = resource.Arn
+			usedTargetGroupArns[resource.Arn] = true
 		} else if existingArn != "" {
 			targetGroupArns[spec.RuleIndex] = existingArn
+			usedTargetGroupArns[existingArn] = true
 		}
 	}
 
-	// Build listener rules
-	state.ListenerRules = b.listenerRuleMgr.BuildResourcesWithExisting(listenerArn, manifest.Ingress.Rules, targetGroupArns, existingRules)
+	// Build DELETE resources for orphaned target groups (from orphaned listener rules)
+	// Only mark as orphaned if the target group belongs to this manifest (by naming pattern or tags)
+	var orphanedTgArns []string
+	for i := range existingRules {
+		rule := &existingRules[i]
+		ruleArn := extractRuleArn(rule)
+		if ruleArn == "" || usedRuleArns[ruleArn] {
+			continue
+		}
+		tgArn := extractTargetGroupArn(rule)
+		if tgArn == "" || usedTargetGroupArns[tgArn] {
+			continue
+		}
+
+		tgName := extractTargetGroupName(tgArn)
+
+		// Check if TG belongs to this manifest by naming convention: {manifestName}-r{priority}
+		if !isTargetGroupOwnedByManifest(tgName, manifest.Name) {
+			log.Debug("skipping orphan detection for TG not owned by manifest",
+				"tgName", tgName, "manifestName", manifest.Name)
+			continue
+		}
+
+		usedTargetGroupArns[tgArn] = true
+		orphanedTgArns = append(orphanedTgArns, tgArn)
+	}
+
+	// Fetch tags for orphaned TGs to verify ownership via tags
+	var orphanTgTags map[string]map[string]string
+	if len(orphanedTgArns) > 0 && b.elbv2Client != nil {
+		tags, err := b.elbv2Client.DescribeTags(ctx, orphanedTgArns)
+		if err != nil {
+			log.Debug("failed to fetch tags for orphaned TGs", "error", err)
+		} else {
+			orphanTgTags = tags
+		}
+	}
+
+	for _, tgArn := range orphanedTgArns {
+		tgName := extractTargetGroupName(tgArn)
+
+		// Double-check ownership via tags if available
+		if orphanTgTags != nil {
+			tags := orphanTgTags[tgArn]
+			if !isOwnedByEcsmate(tags) {
+				log.Debug("skipping orphan TG without ecsmate ownership tag",
+					"tgName", tgName, "tgArn", tgArn)
+				continue
+			}
+		}
+
+		orphanKey := fmt.Sprintf("orphan-%s", tgName)
+		resource := &TargetGroupResource{
+			Name:    tgName,
+			Desired: nil,
+			Arn:     tgArn,
+			Action:  TargetGroupActionDelete,
+		}
+		// Try to discover current state for better diff display
+		if b.targetGroupManager != nil {
+			if tg, err := b.elbv2Client.DescribeTargetGroupByArn(ctx, tgArn); err == nil && tg != nil {
+				resource.Current = tg
+			}
+		}
+		state.TargetGroups[orphanKey] = resource
+		log.Debug("built orphaned target group for deletion", "name", tgName)
+	}
+
+	// Build listener rules with manifest name for ownership-based orphan detection
+	state.ListenerRules = b.listenerRuleMgr.BuildResourcesWithExisting(listenerArn, manifest.Ingress.Rules, targetGroupArns, existingRules, manifest.Name)
 
 	return nil
 }
@@ -380,4 +458,24 @@ func (s *DesiredState) HasChanges() bool {
 	}
 
 	return false
+}
+
+// isTargetGroupOwnedByManifest checks if a target group name follows the naming convention
+// for this manifest: {manifestName}-r{priority}
+func isTargetGroupOwnedByManifest(tgName, manifestName string) bool {
+	if manifestName == "" || tgName == "" {
+		return false
+	}
+
+	// Pattern: {manifestName}-r{number}
+	pattern := regexp.MustCompile(`^` + regexp.QuoteMeta(manifestName) + `-r\d+$`)
+	return pattern.MatchString(tgName)
+}
+
+// isOwnedByEcsmate checks if a resource has the ManagedBy=ecsmate tag
+func isOwnedByEcsmate(tags map[string]string) bool {
+	if tags == nil {
+		return false
+	}
+	return tags[TagKeyManagedBy] == TagValueEcsmate
 }

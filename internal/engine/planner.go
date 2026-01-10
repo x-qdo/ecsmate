@@ -29,6 +29,13 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 		Entries: make([]diff.DiffEntry, 0),
 	}
 
+	// Build resource graph and propagate changes
+	graph, err := BuildResourceGraph(state)
+	if err == nil {
+		changes := graph.PropagateChanges()
+		applyPropagatedChanges(state, changes)
+	}
+
 	p.planTaskDefs(state, plan)
 	p.planTargetGroups(state, plan)
 	p.planListenerRules(state, plan)
@@ -38,6 +45,94 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 	plan.Summary = p.calculateSummary(plan.Entries)
 
 	return plan
+}
+
+// applyPropagatedChanges applies propagated changes from the DAG to the resource state.
+// For ListenerRules, suppresses propagation only when there are no actual config changes
+// AND the propagation isn't due to a recreation (which always requires update for new ARN).
+func applyPropagatedChanges(state *resources.DesiredState, changes map[string]*Change) {
+	for nodeID, change := range changes {
+		if change.Reason == "" {
+			continue // Skip direct changes (not propagated)
+		}
+
+		parts := strings.SplitN(nodeID, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		nodeType, nodeName := parts[0], parts[1]
+
+		switch nodeType {
+		case "Service":
+			if svc, ok := state.Services[nodeName]; ok && svc.Action == resources.ServiceActionNoop {
+				// Services always need update when dependency changes (new task def revision, etc.)
+				svc.Action = serviceActionFromString(change.Action)
+				svc.PropagationReason = change.Reason
+			}
+		case "ListenerRule":
+			for _, rule := range state.ListenerRules {
+				if fmt.Sprintf("priority-%d", rule.Priority) == nodeName && rule.Action == resources.ListenerRuleActionNoop {
+					// Always propagate if:
+					// - Change is DELETE (rule must be deleted with its target group)
+					// - Change is due to recreation (new ARN will be assigned)
+					// Only suppress if there are no config changes AND it's a simple update
+					isDelete := change.Action == "DELETE"
+					isRecreation := strings.Contains(change.Reason, "recreated")
+					if isDelete || isRecreation || rule.HasConfigChanges() {
+						rule.Action = listenerRuleActionFromString(change.Action)
+						rule.PropagationReason = change.Reason
+					}
+				}
+			}
+		case "ScheduledTask":
+			if task, ok := state.ScheduledTasks[nodeName]; ok && task.Action == resources.ScheduledTaskActionNoop {
+				// ScheduledTasks always need update when task def changes
+				task.Action = scheduledTaskActionFromString(change.Action)
+				task.PropagationReason = change.Reason
+			}
+		}
+	}
+}
+
+func serviceActionFromString(action string) resources.ServiceAction {
+	switch action {
+	case "CREATE":
+		return resources.ServiceActionCreate
+	case "UPDATE":
+		return resources.ServiceActionUpdate
+	case "DELETE":
+		return resources.ServiceActionDelete
+	case "RECREATE":
+		return resources.ServiceActionRecreate
+	default:
+		return resources.ServiceActionNoop
+	}
+}
+
+func listenerRuleActionFromString(action string) resources.ListenerRuleAction {
+	switch action {
+	case "CREATE":
+		return resources.ListenerRuleActionCreate
+	case "UPDATE":
+		return resources.ListenerRuleActionUpdate
+	case "DELETE":
+		return resources.ListenerRuleActionDelete
+	default:
+		return resources.ListenerRuleActionNoop
+	}
+}
+
+func scheduledTaskActionFromString(action string) resources.ScheduledTaskAction {
+	switch action {
+	case "CREATE":
+		return resources.ScheduledTaskActionCreate
+	case "UPDATE":
+		return resources.ScheduledTaskActionUpdate
+	case "DELETE":
+		return resources.ScheduledTaskActionDelete
+	default:
+		return resources.ScheduledTaskActionNoop
+	}
 }
 
 func (p *Planner) planTaskDefs(state *resources.DesiredState, plan *Plan) {
@@ -76,8 +171,9 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 
 	for name, svc := range state.Services {
 		entry := diff.DiffEntry{
-			Name:     name,
-			Resource: "Service",
+			Name:              name,
+			Resource:          "Service",
+			PropagationReason: svc.PropagationReason,
 		}
 
 		switch svc.Action {
@@ -116,8 +212,9 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 func (p *Planner) planScheduledTasks(state *resources.DesiredState, plan *Plan) {
 	for name, task := range state.ScheduledTasks {
 		entry := diff.DiffEntry{
-			Name:     name,
-			Resource: "ScheduledTask",
+			Name:              name,
+			Resource:          "ScheduledTask",
+			PropagationReason: task.PropagationReason,
 		}
 
 		switch task.Action {
@@ -225,8 +322,9 @@ func targetGroupRecreateDetails(state *resources.DesiredState, tg *resources.Tar
 func (p *Planner) planListenerRules(state *resources.DesiredState, plan *Plan) {
 	for _, rule := range state.ListenerRules {
 		entry := diff.DiffEntry{
-			Name:     fmt.Sprintf("priority-%d", rule.Priority),
-			Resource: "ListenerRule",
+			Name:              fmt.Sprintf("priority-%d", rule.Priority),
+			Resource:          "ListenerRule",
+			PropagationReason: rule.PropagationReason,
 		}
 
 		switch rule.Action {
@@ -612,11 +710,7 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 			lb := &view.LoadBalancers[i]
 			if lb.ContainerName == containerName && lb.ContainerPort == containerPort {
 				if lb.TargetGroupArn == "" {
-					if arn := resolveTargetGroupArn(targetGroups, manifestName, rule.Priority); arn != "" {
-						lb.TargetGroupArn = arn
-					} else {
-						lb.TargetGroupArn = pendingTargetGroupArn
-					}
+					lb.TargetGroupArn = resolveTargetGroupArnForView(targetGroups, manifestName, rule.Priority)
 				}
 				updated = true
 				break
@@ -624,12 +718,8 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 		}
 
 		if !updated {
-			targetGroupArn := resolveTargetGroupArn(targetGroups, manifestName, rule.Priority)
-			if targetGroupArn == "" {
-				targetGroupArn = pendingTargetGroupArn
-			}
 			view.LoadBalancers = append(view.LoadBalancers, LoadBalancerView{
-				TargetGroupArn: targetGroupArn,
+				TargetGroupArn: resolveTargetGroupArnForView(targetGroups, manifestName, rule.Priority),
 				ContainerName:  containerName,
 				ContainerPort:  containerPort,
 			})
@@ -650,6 +740,37 @@ func resolveTargetGroupArn(targetGroups map[string]*resources.TargetGroupResourc
 	}
 
 	return ""
+}
+
+// resolveTargetGroupArnForView returns the ARN for diff view display.
+// Returns placeholder only when TG is being created or recreated (new ARN will be assigned).
+// For existing TGs (NOOP/UPDATE), returns the existing ARN.
+func resolveTargetGroupArnForView(targetGroups map[string]*resources.TargetGroupResource, manifestName string, priority int) string {
+	if targetGroups == nil || manifestName == "" || priority == 0 {
+		return pendingTargetGroupArn
+	}
+
+	targetGroupName := fmt.Sprintf("%s-r%d", manifestName, priority)
+	for _, tg := range targetGroups {
+		if tg == nil || tg.Name != targetGroupName {
+			continue
+		}
+
+		switch tg.Action {
+		case resources.TargetGroupActionCreate:
+			return pendingTargetGroupArn
+		case resources.TargetGroupActionRecreate:
+			return pendingTargetGroupArn
+		default:
+			// NOOP, UPDATE, DELETE - use existing ARN
+			if tg.Arn != "" {
+				return tg.Arn
+			}
+			return pendingTargetGroupArn
+		}
+	}
+
+	return pendingTargetGroupArn
 }
 
 func manifestName(state *resources.DesiredState) string {
@@ -738,12 +859,18 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 }
 
 type ScheduledTaskView struct {
-	TaskDefinition     string             `json:"taskDefinition"`
-	Cluster            string             `json:"cluster"`
-	ScheduleExpression string             `json:"scheduleExpression"`
-	TaskCount          int                `json:"taskCount"`
-	Timezone           string             `json:"timezone,omitempty"`
-	NetworkConfig      *NetworkConfigView `json:"networkConfiguration,omitempty"`
+	TaskDefinition     string                    `json:"taskDefinition"`
+	Cluster            string                    `json:"cluster"`
+	ScheduleExpression string                    `json:"scheduleExpression"`
+	TaskCount          int                       `json:"taskCount"`
+	Timezone           string                    `json:"timezone,omitempty"`
+	LaunchType         string                    `json:"launchType,omitempty"`
+	PlatformVersion    string                    `json:"platformVersion,omitempty"`
+	Group              string                    `json:"group,omitempty"`
+	NetworkConfig      *NetworkConfigView        `json:"networkConfiguration,omitempty"`
+	Tags               []ScheduledTaskTagView    `json:"tags,omitempty"`
+	DeadLetterConfig   *DeadLetterConfigView     `json:"deadLetterConfig,omitempty"`
+	RetryPolicy        *ScheduledRetryPolicyView `json:"retryPolicy,omitempty"`
 }
 
 func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTaskView {
@@ -756,6 +883,9 @@ func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTask
 		view.Cluster = task.Desired.Cluster
 		view.TaskCount = task.Desired.TaskCount
 		view.Timezone = task.Desired.Timezone
+		view.LaunchType = task.Desired.LaunchType
+		view.PlatformVersion = task.Desired.PlatformVersion
+		view.Group = task.Desired.Group
 
 		if task.Desired.NetworkConfiguration != nil {
 			view.NetworkConfig = &NetworkConfigView{
@@ -764,9 +894,59 @@ func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTask
 				AssignPublicIp: task.Desired.NetworkConfiguration.AssignPublicIp,
 			}
 		}
+
+		if len(task.Desired.Tags) > 0 {
+			view.Tags = buildScheduledTaskTagsView(task.Desired.Tags)
+		}
+
+		if task.Desired.DeadLetterConfig != nil && task.Desired.DeadLetterConfig.Arn != "" {
+			view.DeadLetterConfig = &DeadLetterConfigView{
+				Arn: task.Desired.DeadLetterConfig.Arn,
+			}
+		}
+
+		if task.Desired.RetryPolicy != nil {
+			view.RetryPolicy = &ScheduledRetryPolicyView{
+				MaximumEventAgeInSeconds: task.Desired.RetryPolicy.MaximumEventAgeInSeconds,
+				MaximumRetryAttempts:     task.Desired.RetryPolicy.MaximumRetryAttempts,
+			}
+		}
 	}
 
 	return view
+}
+
+type ScheduledTaskTagView struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type DeadLetterConfigView struct {
+	Arn string `json:"arn"`
+}
+
+type ScheduledRetryPolicyView struct {
+	MaximumEventAgeInSeconds int `json:"maximumEventAgeInSeconds,omitempty"`
+	MaximumRetryAttempts     int `json:"maximumRetryAttempts,omitempty"`
+}
+
+func buildScheduledTaskTagsView(tags []config.Tag) []ScheduledTaskTagView {
+	sorted := make([]ScheduledTaskTagView, 0, len(tags))
+	for _, tag := range tags {
+		if tag.Key == "" {
+			continue
+		}
+		sorted = append(sorted, ScheduledTaskTagView{
+			Key:   tag.Key,
+			Value: tag.Value,
+		})
+	}
+
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Key < sorted[j].Key
+	})
+
+	return sorted
 }
 
 type TargetGroupView struct {

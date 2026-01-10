@@ -302,6 +302,8 @@ scheduledTasks: {
     taskDefinition: "cron"
     cluster: "my-ecs-cluster"
     taskCount: 1
+    platformVersion: "1.4.0"
+    group: "maintenance" // ECS task group
     schedule: {
       type: "cron"
       expression: "0 2 * * ? *"
@@ -312,6 +314,17 @@ scheduledTasks: {
         securityGroups: ["sg-123"]
         assignPublicIp: "DISABLED"
       }
+    }
+    tags: [
+      { key: "env", value: "prod" },
+      { key: "team", value: "ops" },
+    ]
+    deadLetterConfig: {
+      arn: "arn:aws:sqs:us-east-1:123456789012:dlq"
+    }
+    retryPolicy: {
+      maximumEventAgeInSeconds: 300
+      maximumRetryAttempts: 2
     }
   }
 }
@@ -374,7 +387,5 @@ ecsmate template -m examples/cloudinsurance -o yaml
 - `blue-green` and `canary` strategies require CodeDeploy and are not supported
   by the executor.
 - Log groups are only created when using `awslogs` with `createLogGroup: true`.
-- Some schema fields are not wired by the parser yet (for example scheduled task
-  `tags`, `retryPolicy`, `deadLetterConfig`, `group`, `platformVersion`).
 
 [CUE]: https://github.com/cue-lang/cue

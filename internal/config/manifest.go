@@ -330,6 +330,20 @@ type MetricDimension struct {
 	Value string
 }
 
+type Tag struct {
+	Key   string
+	Value string
+}
+
+type DeadLetterConfig struct {
+	Arn string
+}
+
+type RetryPolicy struct {
+	MaximumEventAgeInSeconds int
+	MaximumRetryAttempts     int
+}
+
 type ScheduledTask struct {
 	Name                 string
 	TaskDefinition       string
@@ -341,7 +355,11 @@ type ScheduledTask struct {
 	NetworkConfiguration *NetworkConfiguration
 	LaunchType           string
 	PlatformVersion      string
+	Group                string
 	Overrides            *TaskOverrides
+	Tags                 []Tag
+	DeadLetterConfig     *DeadLetterConfig
+	RetryPolicy          *RetryPolicy
 }
 
 type TaskOverrides struct {
@@ -833,6 +851,12 @@ func parseScheduledTask(name string, v cue.Value) (ScheduledTask, error) {
 	if lt, err := ExtractString(v, "launchType"); err == nil {
 		task.LaunchType = lt
 	}
+	if pv, err := ExtractString(v, "platformVersion"); err == nil {
+		task.PlatformVersion = pv
+	}
+	if group, err := ExtractString(v, "group"); err == nil {
+		task.Group = group
+	}
 
 	// Parse schedule
 	schedule := v.LookupPath(cue.ParsePath("schedule"))
@@ -845,6 +869,63 @@ func parseScheduledTask(name string, v cue.Value) (ScheduledTask, error) {
 		}
 		if tz, err := ExtractString(schedule, "timezone"); err == nil {
 			task.Timezone = tz
+		}
+	}
+
+	// Parse overrides
+	overrides := v.LookupPath(cue.ParsePath("overrides"))
+	if overrides.Exists() {
+		task.Overrides = &TaskOverrides{}
+		if cpu, err := ExtractString(overrides, "cpu"); err == nil {
+			task.Overrides.CPU = cpu
+		}
+		if memory, err := ExtractString(overrides, "memory"); err == nil {
+			task.Overrides.Memory = memory
+		}
+		if roleArn, err := ExtractString(overrides, "taskRoleArn"); err == nil {
+			task.Overrides.TaskRoleArn = roleArn
+		}
+		if roleArn, err := ExtractString(overrides, "executionRoleArn"); err == nil {
+			task.Overrides.ExecutionRoleArn = roleArn
+		}
+
+		containerOverrides := overrides.LookupPath(cue.ParsePath("containerOverrides"))
+		if containerOverrides.Exists() {
+			iter, err := containerOverrides.List()
+			if err == nil {
+				for iter.Next() {
+					co := ContainerOverride{}
+					if name, err := ExtractString(iter.Value(), "name"); err == nil {
+						co.Name = name
+					}
+					if command, err := ExtractStringSlice(iter.Value(), "command"); err == nil {
+						co.Command = command
+					}
+					if cpu, err := ExtractInt(iter.Value(), "cpu"); err == nil {
+						co.CPU = int(cpu)
+					}
+					if memory, err := ExtractInt(iter.Value(), "memory"); err == nil {
+						co.Memory = int(memory)
+					}
+					env := iter.Value().LookupPath(cue.ParsePath("environment"))
+					if env.Exists() {
+						envIter, err := env.List()
+						if err == nil {
+							for envIter.Next() {
+								kv := KeyValuePair{}
+								if key, err := ExtractString(envIter.Value(), "name"); err == nil {
+									kv.Name = key
+								}
+								if val, err := ExtractString(envIter.Value(), "value"); err == nil {
+									kv.Value = val
+								}
+								co.Environment = append(co.Environment, kv)
+							}
+						}
+					}
+					task.Overrides.ContainerOverrides = append(task.Overrides.ContainerOverrides, co)
+				}
+			}
 		}
 	}
 
@@ -861,6 +942,47 @@ func parseScheduledTask(name string, v cue.Value) (ScheduledTask, error) {
 		if pip, err := ExtractString(netConfig, "assignPublicIp"); err == nil {
 			task.NetworkConfiguration.AssignPublicIp = pip
 		}
+	}
+
+	// Parse tags
+	tags := v.LookupPath(cue.ParsePath("tags"))
+	if tags.Exists() {
+		iter, err := tags.List()
+		if err == nil {
+			for iter.Next() {
+				tag := Tag{}
+				if key, err := ExtractString(iter.Value(), "key"); err == nil {
+					tag.Key = key
+				}
+				if value, err := ExtractString(iter.Value(), "value"); err == nil {
+					tag.Value = value
+				}
+				task.Tags = append(task.Tags, tag)
+			}
+		}
+	}
+
+	// Parse dead letter config
+	deadLetter := v.LookupPath(cue.ParsePath("deadLetterConfig"))
+	if deadLetter.Exists() {
+		dl := &DeadLetterConfig{}
+		if arn, err := ExtractString(deadLetter, "arn"); err == nil {
+			dl.Arn = arn
+		}
+		task.DeadLetterConfig = dl
+	}
+
+	// Parse retry policy
+	retryPolicy := v.LookupPath(cue.ParsePath("retryPolicy"))
+	if retryPolicy.Exists() {
+		rp := &RetryPolicy{}
+		if age, err := ExtractInt(retryPolicy, "maximumEventAgeInSeconds"); err == nil {
+			rp.MaximumEventAgeInSeconds = int(age)
+		}
+		if attempts, err := ExtractInt(retryPolicy, "maximumRetryAttempts"); err == nil {
+			rp.MaximumRetryAttempts = int(attempts)
+		}
+		task.RetryPolicy = rp
 	}
 
 	return task, nil

@@ -459,3 +459,39 @@ func (c *ELBV2Client) ModifyListenerRule(ctx context.Context, ruleArn string, co
 	log.Info("modified listener rule", "arn", ruleArn)
 	return nil
 }
+
+// DescribeTags fetches tags for the given resource ARNs (up to 20 at a time).
+func (c *ELBV2Client) DescribeTags(ctx context.Context, arns []string) (map[string]map[string]string, error) {
+	if len(arns) == 0 {
+		return nil, nil
+	}
+
+	result := make(map[string]map[string]string)
+
+	// AWS allows max 20 ARNs per request
+	for i := 0; i < len(arns); i += 20 {
+		end := i + 20
+		if end > len(arns) {
+			end = len(arns)
+		}
+		batch := arns[i:end]
+
+		out, err := c.client.DescribeTags(ctx, &elasticloadbalancingv2.DescribeTagsInput{
+			ResourceArns: batch,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to describe tags: %w", err)
+		}
+
+		for _, td := range out.TagDescriptions {
+			arn := aws.ToString(td.ResourceArn)
+			tags := make(map[string]string)
+			for _, tag := range td.Tags {
+				tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+			}
+			result[arn] = tags
+		}
+	}
+
+	return result, nil
+}

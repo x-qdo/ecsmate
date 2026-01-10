@@ -148,16 +148,17 @@ func (e *Executor) refreshTaskDefinitionRefs(plan *ExecutionPlan) {
 
 	if plan.Graph != nil {
 		for _, node := range plan.Graph.nodes {
-			if node == nil || node.Resource == nil || node.Resource.Desired == nil {
+			svc := node.ServiceResource()
+			if svc == nil || svc.Desired == nil {
 				continue
 			}
-			taskDefName := node.Resource.Desired.TaskDefinition
+			taskDefName := svc.Desired.TaskDefinition
 			if taskDefName == "" {
 				continue
 			}
 			if arn, ok := taskDefArns[taskDefName]; ok && arn != "" {
 				log.Debug("refreshing service task definition", "service", node.Name, "taskDef", taskDefName, "arn", arn)
-				node.Resource.TaskDefinitionArn = arn
+				svc.TaskDefinitionArn = arn
 			}
 		}
 	}
@@ -273,7 +274,7 @@ func (e *Executor) applyListenerRules(ctx context.Context, plan *ExecutionPlan, 
 
 	e.tracker.PrintSection("\nListener Rules")
 
-	ruleResources, err := e.listenerRuleManager.BuildResources(ctx, ingress.ListenerArn, ingress.Rules, targetGroupArns)
+	ruleResources, err := e.listenerRuleManager.BuildResources(ctx, ingress.ListenerArn, ingress.Rules, targetGroupArns, plan.Manifest.Name)
 	if err != nil {
 		return fmt.Errorf("failed to build listener rules: %w", err)
 	}
@@ -383,7 +384,10 @@ func (e *Executor) deployServices(ctx context.Context, plan *ExecutionPlan) erro
 				continue
 			}
 
-			svc := node.Resource
+			svc := node.ServiceResource()
+			if svc == nil {
+				continue
+			}
 			wg.Add(1)
 
 			go func(svc *resources.ServiceResource) {
@@ -754,7 +758,8 @@ func (e *Executor) resolveIngressTargetGroups(plan *ExecutionPlan, targetGroupAr
 	ResolveIngressTargetGroups(plan.Manifest.Services, plan.Manifest.Ingress, targetGroupArns)
 
 	for name, node := range plan.Graph.nodes {
-		if node == nil || node.Resource == nil {
+		svc := node.ServiceResource()
+		if svc == nil {
 			continue
 		}
 
@@ -766,10 +771,10 @@ func (e *Executor) resolveIngressTargetGroups(plan *ExecutionPlan, targetGroupAr
 		desiredName := ""
 		desiredCluster := ""
 		desiredTaskDef := ""
-		if node.Resource.Desired != nil {
-			desiredName = node.Resource.Desired.Name
-			desiredCluster = node.Resource.Desired.Cluster
-			desiredTaskDef = node.Resource.Desired.TaskDefinition
+		if svc.Desired != nil {
+			desiredName = svc.Desired.Name
+			desiredCluster = svc.Desired.Cluster
+			desiredTaskDef = svc.Desired.TaskDefinition
 		}
 
 		if desiredName != "" {
@@ -782,9 +787,9 @@ func (e *Executor) resolveIngressTargetGroups(plan *ExecutionPlan, targetGroupAr
 			updated.TaskDefinition = desiredTaskDef
 		}
 
-		node.Resource.Desired = new(config.Service)
-		*node.Resource.Desired = updated
-		node.Resource.RecalculateAction()
+		svc.Desired = new(config.Service)
+		*svc.Desired = updated
+		svc.RecalculateAction()
 	}
 }
 
