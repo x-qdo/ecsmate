@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +33,12 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	// Build load configuration
 	cfg := &load.Config{
 		Dir: manifestPath,
+	}
+	if moduleRoot, modulePath, err := findModuleRoot(manifestPath); err != nil {
+		return cue.Value{}, err
+	} else if moduleRoot != "" && modulePath != "" {
+		cfg.ModuleRoot = moduleRoot
+		cfg.Module = modulePath
 	}
 
 	// Determine which files to load
@@ -123,6 +130,87 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	}
 
 	return value, nil
+}
+
+func findModuleRoot(start string) (string, string, error) {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve manifest path: %w", err)
+	}
+
+	for {
+		cueModule := filepath.Join(dir, "cue.mod", "module.cue")
+		if _, err := os.Stat(cueModule); err == nil {
+			modulePath, err := readCueModule(cueModule)
+			if err != nil {
+				return "", "", err
+			}
+			return dir, modulePath, nil
+		}
+
+		goModule := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goModule); err == nil {
+			modulePath, err := readGoModule(goModule)
+			if err != nil {
+				return "", "", err
+			}
+			return dir, modulePath, nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return "", "", nil
+}
+
+func readGoModule(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open go.mod: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module ")), nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("failed to read go.mod: %w", err)
+	}
+
+	return "", nil
+}
+
+func readCueModule(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open cue module file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "module:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "module:"))
+			value = strings.Trim(value, "\"")
+			return value, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("failed to read cue module file: %w", err)
+	}
+
+	return "", nil
 }
 
 // applySetValues applies --set key=value overrides
