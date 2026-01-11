@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"cuelang.org/go/cue"
@@ -70,12 +71,14 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 		}
 	}
 
-	// Add values directory files (shared defaults and SSM config)
+	// Add values directory files directly in values/ (not subdirectories).
+	// Subdirectory files (envs/*.cue, tenants/*.cue) must be explicitly specified via -f flag.
 	valuesPath := filepath.Join(manifestPath, "values")
 	if stat, err := os.Stat(valuesPath); err == nil && stat.IsDir() {
 		valuesEntries, err := os.ReadDir(valuesPath)
 		if err == nil {
 			for _, entry := range valuesEntries {
+				// Only load .cue files directly in values/, skip subdirectories
 				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".cue") {
 					files = append(files, filepath.Join("values", entry.Name()))
 				}
@@ -111,17 +114,18 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 		return cue.Value{}, fmt.Errorf("failed to load CUE instance: %w", inst.Err)
 	}
 
-	// Build the value
+	// Build the value first
 	value := l.ctx.BuildInstance(inst)
 	if value.Err() != nil {
-		return cue.Value{}, fmt.Errorf("failed to build CUE value: %w", value.Err())
+		return cue.Value{}, fmt.Errorf("failed to build CUE value:\n%s", formatCUEValidationError(value, value.Err()))
 	}
 
-	// Apply --set overrides
+	// Apply --set overrides after building using FillPath
 	if len(setValues) > 0 {
+		var err error
 		value, err = l.applySetValues(value, setValues)
 		if err != nil {
-			return cue.Value{}, fmt.Errorf("failed to apply set values: %w", err)
+			return cue.Value{}, err
 		}
 	}
 
@@ -132,7 +136,7 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 
 	// Validate against schema
 	if err := value.Validate(); err != nil {
-		return cue.Value{}, fmt.Errorf("CUE schema validation failed: %w", err)
+		return cue.Value{}, fmt.Errorf("CUE schema validation failed:\n%s", formatCUEValidationError(value, err))
 	}
 
 	// Verify manifest is constrained by schema
@@ -224,38 +228,126 @@ func readCueModule(path string) (string, error) {
 	return "", nil
 }
 
-// applySetValues applies --set key=value overrides
+// formatCUEValidationError formats a CUE validation error with verbose details.
+func formatCUEValidationError(value cue.Value, err error) string {
+	var sb strings.Builder
+	sb.WriteString(err.Error())
+	sb.WriteString("\n\nCUE Validation Details:\n")
+
+	value.Walk(func(v cue.Value) bool {
+		if v.Err() != nil {
+			path := v.Path().String()
+			if path == "" {
+				path = "<root>"
+			}
+			sb.WriteString(fmt.Sprintf("  - %s: %v\n", path, v.Err()))
+		}
+		return true
+	}, nil)
+
+	return sb.String()
+}
+
+// applySetValues applies --set key=value overrides using FillPath
 func (l *CUELoader) applySetValues(value cue.Value, setValues []string) (cue.Value, error) {
+	if len(setValues) == 0 {
+		return value, nil
+	}
+
+	result := value
 	for _, sv := range setValues {
 		parts := strings.SplitN(sv, "=", 2)
 		if len(parts) != 2 {
-			return cue.Value{}, fmt.Errorf("invalid set value format: %s (expected key=value)", sv)
+			return cue.Value{}, fmt.Errorf("invalid --set format %q: expected key=value (e.g., --set images.tag=v1.0.0)", sv)
 		}
 		key, val := parts[0], parts[1]
 
-		// Build a CUE expression for the override
-		// Convert key path like "image.tag" to CUE path
-		pathParts := strings.Split(key, ".")
+		log.Debug("applying set override", "key", key, "value", val)
 
-		// Create override value
-		override := l.ctx.CompileString(fmt.Sprintf("%q", val))
-		if override.Err() != nil {
-			// Try as raw value (for numbers, bools)
-			override = l.ctx.CompileString(val)
-			if override.Err() != nil {
-				return cue.Value{}, fmt.Errorf("failed to compile set value %s=%s: %w", key, val, override.Err())
-			}
+		// Parse the path (handles hidden fields prefixed with _)
+		path := parseCUEPath(key)
+
+		// Check if the field exists
+		existing := result.LookupPath(path)
+		if !existing.Exists() {
+			return cue.Value{}, fmt.Errorf("--set %s: field does not exist\n  Available top-level fields: %s", key, listTopLevelFields(result))
 		}
 
-		// Apply the override using FillPath
-		selectors := make([]cue.Selector, len(pathParts))
-		for i, p := range pathParts {
-			selectors[i] = cue.Str(p)
+		// Parse the value to proper CUE type
+		expr := formatCUEValue(val)
+		cueVal := l.ctx.CompileString(expr)
+		if cueVal.Err() != nil {
+			return cue.Value{}, fmt.Errorf("--set %s: invalid value %q: %w", key, val, cueVal.Err())
 		}
-		value = value.FillPath(cue.MakePath(selectors...), override)
+
+		// Use FillPath to override the value
+		result = result.FillPath(path, cueVal)
+		if result.Err() != nil {
+			return cue.Value{}, fmt.Errorf("--set %s=%s: %w", key, val, result.Err())
+		}
 	}
 
-	return value, nil
+	return result, nil
+}
+
+// parseCUEPath parses a dot-separated path into CUE selectors, handling hidden fields
+func parseCUEPath(path string) cue.Path {
+	parts := strings.Split(path, ".")
+	selectors := make([]cue.Selector, len(parts))
+	for i, part := range parts {
+		if strings.HasPrefix(part, "_") {
+			selectors[i] = cue.Hid(part, "_")
+		} else {
+			selectors[i] = cue.Str(part)
+		}
+	}
+	return cue.MakePath(selectors...)
+}
+
+// listTopLevelFields returns a comma-separated list of top-level field names for error messages
+func listTopLevelFields(v cue.Value) string {
+	var fields []string
+	iter, _ := v.Fields(cue.All())
+	for iter.Next() {
+		fields = append(fields, iter.Selector().String())
+	}
+	if len(fields) == 0 {
+		return "(none)"
+	}
+	return strings.Join(fields, ", ")
+}
+
+// buildCUEOverrideExpr builds a CUE struct expression for a dotted path.
+func buildCUEOverrideExpr(path, value string) string {
+	parts := strings.Split(path, ".")
+	quotedValue := formatCUEValue(value)
+
+	var sb strings.Builder
+	for i, part := range parts {
+		if i > 0 {
+			sb.WriteString(" ")
+		}
+		sb.WriteString(part)
+		sb.WriteString(":")
+	}
+	sb.WriteString(" ")
+	sb.WriteString(quotedValue)
+
+	return sb.String()
+}
+
+// formatCUEValue formats a value for a CUE expression.
+func formatCUEValue(val string) string {
+	if _, err := strconv.ParseInt(val, 10, 64); err == nil {
+		return val
+	}
+	if _, err := strconv.ParseFloat(val, 64); err == nil {
+		return val
+	}
+	if val == "true" || val == "false" {
+		return val
+	}
+	return fmt.Sprintf("%q", val)
 }
 
 // GetManifest extracts the manifest from a CUE value

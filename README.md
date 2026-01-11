@@ -351,13 +351,39 @@ ingress: {
 
 ## Values and overrides
 Manifests commonly split defaults and environment-specific values under
-`values/`. Provide extra overlays with `-f` and ad-hoc changes with `--set`.
+`values/`. Files directly in `values/` (like `default.cue`, `_ssm.cue`) are
+auto-loaded. Subdirectory files (`values/envs/*.cue`, `values/tenants/*.cue`)
+must be explicitly provided with `-f`. Ad-hoc changes use `--set`.
+
+### Making values overridable
+To allow `--set` overrides, use CUE's default syntax (`type | *"default"`)
+instead of concrete values:
+```cue
+// Overridable (recommended)
+images: {
+  tag: string | *"latest"      // --set images.tag=v2.0 works
+  registry: string | *"ecr.aws"
+}
+
+// NOT overridable (concrete values cause conflicts)
+images: {
+  tag: "latest"                // --set images.tag=v2.0 fails
+}
+```
+
+The `--set` flag uses CUE unification, which can only fill in or narrow
+constraints. Concrete values like `tag: "latest"` are already fully specified
+and cannot be changed. The default syntax `string | *"latest"` defines a
+constraint (`string`) with a default (`*"latest"`) that can be overridden.
 
 Examples:
 ```bash
 ecsmate diff -m ./deploy -f values/staging.cue
-ecsmate apply -m ./deploy --set image.tag=v1.2.3
-ecsmate diff -m examples/cloudinsurance -f examples/cloudinsurance/values/tenants/cal.cue --set _values.images.tag=20260111-r2
+ecsmate apply -m ./deploy --set images.tag=v1.2.3
+ecsmate diff -m examples/cloudinsurance \
+  -f examples/cloudinsurance/values/envs/stage.cue \
+  -f examples/cloudinsurance/values/tenants/cal.cue \
+  --set images.tag=20260111-r4
 ```
 
 ## SSM parameter references

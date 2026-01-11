@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cuelang.org/go/cue"
 )
 
 func TestStrictSchemaValidation(t *testing.T) {
@@ -106,4 +108,156 @@ func findProjectRoot() (string, error) {
 	}
 
 	return "", os.ErrNotExist
+}
+
+func TestApplySetValues_OverridesDefaultValues(t *testing.T) {
+	loader := NewCUELoader()
+
+	// Use CUE default syntax (string | *"value") which allows override
+	base := loader.ctx.CompileString(`
+		images: {
+			tag: string | *"original"
+			registry: string | *"ecr.aws"
+		}
+	`)
+	if base.Err() != nil {
+		t.Fatalf("failed to compile base: %v", base.Err())
+	}
+
+	result, err := loader.applySetValues(base, []string{"images.tag=overridden"})
+	if err != nil {
+		t.Fatalf("applySetValues failed: %v", err)
+	}
+
+	tag, err := ExtractString(result, "images.tag")
+	if err != nil {
+		t.Fatalf("failed to extract tag: %v", err)
+	}
+	if tag != "overridden" {
+		t.Errorf("expected tag 'overridden', got '%s'", tag)
+	}
+}
+
+func TestApplySetValues_HiddenFields(t *testing.T) {
+	loader := NewCUELoader()
+
+	// Use CUE default syntax for hidden fields
+	base := loader.ctx.CompileString(`
+		_values: {
+			namespace: string | *"original"
+		}
+	`)
+	if base.Err() != nil {
+		t.Fatalf("failed to compile base: %v", base.Err())
+	}
+
+	result, err := loader.applySetValues(base, []string{"_values.namespace=overridden"})
+	if err != nil {
+		t.Fatalf("applySetValues failed: %v", err)
+	}
+
+	nsPath := cue.MakePath(cue.Hid("_values", "_"), cue.Str("namespace"))
+	nsVal := result.LookupPath(nsPath)
+	if nsVal.Err() != nil {
+		t.Fatalf("failed to lookup _values.namespace: %v", nsVal.Err())
+	}
+	ns, err := nsVal.String()
+	if err != nil {
+		t.Fatalf("failed to get string value: %v", err)
+	}
+	if ns != "overridden" {
+		t.Errorf("expected namespace 'overridden', got '%s'", ns)
+	}
+}
+
+func TestApplySetValues_NumericValues(t *testing.T) {
+	loader := NewCUELoader()
+
+	// Use CUE default syntax for numeric and boolean values
+	base := loader.ctx.CompileString(`
+		config: {
+			count: int | *1
+			enabled: bool | *true
+		}
+	`)
+	if base.Err() != nil {
+		t.Fatalf("failed to compile base: %v", base.Err())
+	}
+
+	result, err := loader.applySetValues(base, []string{"config.count=42", "config.enabled=false"})
+	if err != nil {
+		t.Fatalf("applySetValues failed: %v", err)
+	}
+
+	count, err := ExtractInt(result, "config.count")
+	if err != nil {
+		t.Fatalf("failed to extract count: %v", err)
+	}
+	if count != 42 {
+		t.Errorf("expected count 42, got %d", count)
+	}
+
+	enabled, err := ExtractBool(result, "config.enabled")
+	if err != nil {
+		t.Fatalf("failed to extract enabled: %v", err)
+	}
+	if enabled != false {
+		t.Errorf("expected enabled false, got %v", enabled)
+	}
+}
+
+func TestApplySetValues_InvalidFormat(t *testing.T) {
+	loader := NewCUELoader()
+
+	base := loader.ctx.CompileString(`foo: "bar"`)
+	if base.Err() != nil {
+		t.Fatalf("failed to compile base: %v", base.Err())
+	}
+
+	_, err := loader.applySetValues(base, []string{"invalid-no-equals"})
+	if err == nil {
+		t.Error("expected error for invalid format")
+	} else if !strings.Contains(err.Error(), "expected key=value") {
+		t.Errorf("expected 'expected key=value' in error, got: %v", err)
+	}
+}
+
+func TestApplySetValues_NonExistentField(t *testing.T) {
+	loader := NewCUELoader()
+
+	base := loader.ctx.CompileString(`foo: "bar"`)
+	if base.Err() != nil {
+		t.Fatalf("failed to compile base: %v", base.Err())
+	}
+
+	_, err := loader.applySetValues(base, []string{"nonexistent.field=value"})
+	if err == nil {
+		t.Error("expected error for non-existent field")
+	} else if !strings.Contains(err.Error(), "field does not exist") {
+		t.Errorf("expected 'field does not exist' in error, got: %v", err)
+	}
+}
+
+func TestBuildCUEOverrideExpr(t *testing.T) {
+	tests := []struct {
+		path     string
+		value    string
+		expected string
+	}{
+		{path: "tag", value: "v1", expected: `tag: "v1"`},
+		{path: "images.tag", value: "v1", expected: `images: tag: "v1"`},
+		{path: "a.b.c", value: "value", expected: `a: b: c: "value"`},
+		{path: "_values.namespace", value: "cal", expected: `_values: namespace: "cal"`},
+		{path: "count", value: "42", expected: `count: 42`},
+		{path: "enabled", value: "true", expected: `enabled: true`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path+"="+tt.value, func(t *testing.T) {
+			result := buildCUEOverrideExpr(tt.path, tt.value)
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
 }
