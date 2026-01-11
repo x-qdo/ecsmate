@@ -678,8 +678,12 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 		addIngressLoadBalancerPlaceholders(&view, svc.Desired, ingress, svc.Name, targetGroups, manifestName)
 		addTaskDefinitionPlaceholder(&view, svc.Desired, taskDefs)
 
+		strategy := svc.Desired.Deployment.Strategy
+		if strategy == "" {
+			strategy = "rolling"
+		}
 		view.Deployment = &DeploymentConfigView{
-			Strategy:               svc.Desired.Deployment.Strategy,
+			Strategy:               strategy,
 			CircuitBreakerEnable:   svc.Desired.Deployment.CircuitBreakerEnable,
 			CircuitBreakerRollback: svc.Desired.Deployment.CircuitBreakerRollback,
 		}
@@ -877,7 +881,9 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 
 		if svc.Current.DeploymentConfiguration != nil {
 			dc := svc.Current.DeploymentConfiguration
-			view.Deployment = &DeploymentConfigView{}
+			view.Deployment = &DeploymentConfigView{
+				Strategy: "rolling",
+			}
 			if dc.MinimumHealthyPercent != nil {
 				value := int(*dc.MinimumHealthyPercent)
 				view.Deployment.MinimumHealthyPercent = &value
