@@ -333,16 +333,16 @@ func (m *TaskDefManager) buildMergedTaskDef(ctx context.Context, resource *TaskD
 
 func (m *TaskDefManager) applyOverrides(base *types.TaskDefinition, td *config.TaskDefinition) *config.TaskDefinition {
 	merged := &config.TaskDefinition{
-		Name:                     td.Name,
-		Type:                     "managed",
-		Family:                   aws.ToString(base.Family),
-		CPU:                      aws.ToString(base.Cpu),
-		Memory:                   aws.ToString(base.Memory),
-		NetworkMode:              string(base.NetworkMode),
-		ExecutionRoleArn:         aws.ToString(base.ExecutionRoleArn),
-		TaskRoleArn:              aws.ToString(base.TaskRoleArn),
-		RequiresCompatibilities:  make([]string, 0, len(base.RequiresCompatibilities)),
-		ContainerDefinitions:     make([]config.ContainerDefinition, 0, len(base.ContainerDefinitions)),
+		Name:                    td.Name,
+		Type:                    "managed",
+		Family:                  aws.ToString(base.Family),
+		CPU:                     aws.ToString(base.Cpu),
+		Memory:                  aws.ToString(base.Memory),
+		NetworkMode:             string(base.NetworkMode),
+		ExecutionRoleArn:        aws.ToString(base.ExecutionRoleArn),
+		TaskRoleArn:             aws.ToString(base.TaskRoleArn),
+		RequiresCompatibilities: make([]string, 0, len(base.RequiresCompatibilities)),
+		ContainerDefinitions:    make([]config.ContainerDefinition, 0, len(base.ContainerDefinitions)),
 	}
 
 	for _, compat := range base.RequiresCompatibilities {
@@ -405,12 +405,12 @@ func (m *TaskDefManager) applyOverrides(base *types.TaskDefinition, td *config.T
 
 func convertECSContainerDefinition(cd types.ContainerDefinition) config.ContainerDefinition {
 	result := config.ContainerDefinition{
-		Name:      aws.ToString(cd.Name),
-		Image:     aws.ToString(cd.Image),
-		CPU:       int(cd.Cpu),
-		Memory:    int(aws.ToInt32(cd.Memory)),
-		Essential: aws.ToBool(cd.Essential),
-		Command:   cd.Command,
+		Name:       aws.ToString(cd.Name),
+		Image:      aws.ToString(cd.Image),
+		CPU:        int(cd.Cpu),
+		Memory:     int(aws.ToInt32(cd.Memory)),
+		Essential:  aws.ToBool(cd.Essential),
+		Command:    cd.Command,
 		EntryPoint: cd.EntryPoint,
 	}
 
@@ -625,6 +625,131 @@ func hasContainerChanges(current types.ContainerDefinition, desired config.Conta
 	}
 
 	return false
+}
+
+// IsImageOnlyChange returns true if the only difference between current and desired
+// is container image fields. Returns false if action is NOOP/CREATE or if there are
+// non-image changes.
+func (resource *TaskDefResource) IsImageOnlyChange() bool {
+	if resource.Action != TaskDefActionUpdate {
+		return false
+	}
+	if resource.Current == nil || resource.Desired == nil {
+		return false
+	}
+
+	if resource.hasTaskLevelChanges() {
+		return false
+	}
+
+	return resource.hasImageOnlyContainerChanges()
+}
+
+// hasTaskLevelChanges checks if any task-definition-level fields changed (not containers)
+func (resource *TaskDefResource) hasTaskLevelChanges() bool {
+	current := resource.Current
+	desired := resource.Desired
+
+	if aws.ToString(current.Cpu) != desired.CPU {
+		return true
+	}
+	if aws.ToString(current.Memory) != desired.Memory {
+		return true
+	}
+	if string(current.NetworkMode) != desired.NetworkMode {
+		return true
+	}
+	if aws.ToString(current.ExecutionRoleArn) != desired.ExecutionRoleArn {
+		return true
+	}
+	if aws.ToString(current.TaskRoleArn) != desired.TaskRoleArn {
+		return true
+	}
+	if len(current.ContainerDefinitions) != len(desired.ContainerDefinitions) {
+		return true
+	}
+	return false
+}
+
+// hasImageOnlyContainerChanges returns true if changes exist and all are image-only
+func (resource *TaskDefResource) hasImageOnlyContainerChanges() bool {
+	current := resource.Current
+	desired := resource.Desired
+
+	if len(current.ContainerDefinitions) != len(desired.ContainerDefinitions) {
+		return false
+	}
+
+	hasAnyImageChange := false
+	for i, cd := range desired.ContainerDefinitions {
+		if i >= len(current.ContainerDefinitions) {
+			return false
+		}
+		currentCD := current.ContainerDefinitions[i]
+		imageChanged, hasOtherChanges := compareContainerForImageOnly(currentCD, cd)
+		if hasOtherChanges {
+			return false
+		}
+		if imageChanged {
+			hasAnyImageChange = true
+		}
+	}
+	return hasAnyImageChange
+}
+
+// compareContainerForImageOnly returns (imageChanged, hasOtherChanges)
+func compareContainerForImageOnly(current types.ContainerDefinition, desired config.ContainerDefinition) (bool, bool) {
+	imageChanged := aws.ToString(current.Image) != desired.Image
+
+	if aws.ToString(current.Name) != desired.Name {
+		return imageChanged, true
+	}
+	if int(current.Cpu) != desired.CPU {
+		return imageChanged, true
+	}
+	if int(aws.ToInt32(current.Memory)) != desired.Memory && desired.Memory != 0 {
+		return imageChanged, true
+	}
+	if !stringSliceEqual(current.Command, desired.Command) {
+		return imageChanged, true
+	}
+	if !stringSliceEqual(current.EntryPoint, desired.EntryPoint) {
+		return imageChanged, true
+	}
+
+	if len(current.Environment) != len(desired.Environment) {
+		return imageChanged, true
+	}
+	for _, dEnv := range desired.Environment {
+		found := false
+		for _, cEnv := range current.Environment {
+			if aws.ToString(cEnv.Name) == dEnv.Name && aws.ToString(cEnv.Value) == dEnv.Value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return imageChanged, true
+		}
+	}
+
+	if len(current.Secrets) != len(desired.Secrets) {
+		return imageChanged, true
+	}
+	for _, dSecret := range desired.Secrets {
+		found := false
+		for _, cSecret := range current.Secrets {
+			if aws.ToString(cSecret.Name) == dSecret.Name && aws.ToString(cSecret.ValueFrom) == dSecret.ValueFrom {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return imageChanged, true
+		}
+	}
+
+	return imageChanged, false
 }
 
 // Register registers the task definition with ECS

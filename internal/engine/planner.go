@@ -411,6 +411,77 @@ func (plan *Plan) HasChanges() bool {
 	return plan.Summary.Creates > 0 || plan.Summary.Updates > 0 || plan.Summary.Deletes > 0 || plan.Summary.Recreates > 0
 }
 
+// HasImageOnlyChanges returns true if all changes are image-only updates.
+// This means:
+// - All TaskDefinition changes are image-only (only container image fields differ)
+// - All Service/ScheduledTask changes are either:
+//   - Propagated from image-only TaskDefs, or
+//   - Their TaskDef is unchanged (NOOP) - these updates are unrelated to image changes
+//
+// - No other resource types (TargetGroup, ListenerRule, etc.) have changes
+func (plan *Plan) HasImageOnlyChanges() bool {
+	if !plan.HasChanges() {
+		return false
+	}
+
+	imageOnlyTaskDefs := make(map[string]bool)
+	noopTaskDefs := make(map[string]bool)
+
+	// First pass: categorize TaskDefs from state (not entries, as NOOP may be filtered)
+	for name, td := range plan.State.TaskDefs {
+		if td.Action == resources.TaskDefActionNoop {
+			noopTaskDefs[name] = true
+		} else if td.IsImageOnlyChange() {
+			imageOnlyTaskDefs[name] = true
+		}
+	}
+
+	// Second pass: validate all entries
+	for _, entry := range plan.Entries {
+		if entry.Type == diff.DiffTypeNoop {
+			continue
+		}
+
+		switch entry.Resource {
+		case "TaskDefinition":
+			if !imageOnlyTaskDefs[entry.Name] {
+				return false
+			}
+
+		case "Service":
+			svc, ok := plan.State.Services[entry.Name]
+			if !ok || svc.Desired == nil {
+				return false
+			}
+			tdName := svc.Desired.TaskDefinition
+			// Allow if:
+			// - TaskDef is image-only (service updates because of image-only TaskDef change), or
+			// - TaskDef is NOOP (service update is unrelated to TaskDef/image changes)
+			if !imageOnlyTaskDefs[tdName] && !noopTaskDefs[tdName] {
+				return false
+			}
+
+		case "ScheduledTask":
+			task, ok := plan.State.ScheduledTasks[entry.Name]
+			if !ok || task.Desired == nil {
+				return false
+			}
+			tdName := task.Desired.TaskDefinition
+			// Allow if:
+			// - TaskDef is image-only (task updates because of image-only TaskDef change), or
+			// - TaskDef is NOOP (task update is unrelated to TaskDef/image changes)
+			if !imageOnlyTaskDefs[tdName] && !noopTaskDefs[tdName] {
+				return false
+			}
+
+		default:
+			return false
+		}
+	}
+
+	return len(imageOnlyTaskDefs) > 0
+}
+
 type TaskDefView struct {
 	Type                    string             `json:"type"`
 	Family                  string             `json:"family,omitempty"`
