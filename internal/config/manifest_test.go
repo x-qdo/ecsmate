@@ -612,6 +612,90 @@ func TestParseManifest_ServiceDependsOn(t *testing.T) {
 	}
 }
 
+func TestParseManifest_ServiceRegistries(t *testing.T) {
+	ctx := cuecontext.New()
+	cueStr := `{
+		name: "test-app"
+		taskDefinitions: {
+			web: {
+				type: "managed"
+				family: "test-web"
+				containerDefinitions: [{
+					name: "app"
+					image: "nginx:latest"
+				}]
+			}
+		}
+		services: {
+			web: {
+				cluster: "test-cluster"
+				taskDefinition: "web"
+				desiredCount: 1
+				serviceRegistries: [{
+					registryArn: "arn:aws:servicediscovery:us-east-1:123:service/srv-abc"
+					containerName: "app"
+					containerPort: 80
+				}, {
+					serviceDiscovery: {
+						namespaceArn: "arn:aws:servicediscovery:us-east-1:123:namespace/ns-abc"
+						tags: {
+							Env: "dev"
+						}
+					}
+					containerName: "app"
+					containerPort: 80
+				}]
+			}
+		}
+	}`
+
+	value := ctx.CompileString(cueStr)
+	if value.Err() != nil {
+		t.Fatalf("failed to compile CUE: %v", value.Err())
+	}
+
+	manifest, err := ParseManifest(value)
+	if err != nil {
+		t.Fatalf("failed to parse manifest: %v", err)
+	}
+
+	svc, ok := manifest.Services["web"]
+	if !ok {
+		t.Fatal("expected service 'web' not found")
+	}
+	if len(svc.ServiceRegistries) != 2 {
+		t.Fatalf("expected 2 service registries, got %d", len(svc.ServiceRegistries))
+	}
+
+	external := svc.ServiceRegistries[0]
+	if external.RegistryArn == "" {
+		t.Error("expected external registry ARN to be set")
+	}
+	if external.ServiceDiscovery != nil {
+		t.Error("expected external registry to not have service discovery")
+	}
+
+	managed := svc.ServiceRegistries[1]
+	if managed.ServiceDiscovery == nil {
+		t.Fatal("expected managed service discovery to be set")
+	}
+	if managed.ServiceDiscovery.NamespaceArn == "" {
+		t.Error("expected namespace ARN to be set")
+	}
+	if managed.ServiceDiscovery.DNSRecordType != "A" {
+		t.Errorf("expected default DNSRecordType A, got %q", managed.ServiceDiscovery.DNSRecordType)
+	}
+	if managed.ServiceDiscovery.DNSTTL != 60 {
+		t.Errorf("expected default DNSTTL 60, got %d", managed.ServiceDiscovery.DNSTTL)
+	}
+	if managed.ServiceDiscovery.RoutingPolicy != "MULTIVALUE" {
+		t.Errorf("expected default RoutingPolicy MULTIVALUE, got %q", managed.ServiceDiscovery.RoutingPolicy)
+	}
+	if managed.ServiceDiscovery.Tags["Env"] != "dev" {
+		t.Errorf("expected tag Env=dev, got %q", managed.ServiceDiscovery.Tags["Env"])
+	}
+}
+
 func TestParseManifest_TaskDefinitionMissingType(t *testing.T) {
 	ctx := cuecontext.New()
 	cueStr := `{

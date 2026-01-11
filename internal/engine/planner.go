@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/qdo/ecsmate/internal/config"
 	"github.com/qdo/ecsmate/internal/diff"
 	"github.com/qdo/ecsmate/internal/resources"
@@ -37,6 +38,7 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 	}
 
 	p.planTaskDefs(state, plan)
+	p.planServiceDiscovery(state, plan)
 	p.planTargetGroups(state, plan)
 	p.planListenerRules(state, plan)
 	p.planServices(state, plan)
@@ -155,6 +157,39 @@ func (p *Planner) planTaskDefs(state *resources.DesiredState, plan *Plan) {
 			plan.Summary.Updates++
 
 		case resources.TaskDefActionNoop:
+			entry.Type = diff.DiffTypeNoop
+			plan.Summary.Noops++
+		}
+
+		plan.Entries = append(plan.Entries, entry)
+	}
+}
+
+func (p *Planner) planServiceDiscovery(state *resources.DesiredState, plan *Plan) {
+	for name, sd := range state.ServiceDiscovery {
+		entry := diff.DiffEntry{
+			Name:     name,
+			Resource: "ServiceDiscovery",
+		}
+
+		switch sd.Action {
+		case resources.ServiceDiscoveryActionCreate:
+			entry.Type = diff.DiffTypeCreate
+			entry.Desired = buildServiceDiscoveryView(sd)
+			plan.Summary.Creates++
+
+		case resources.ServiceDiscoveryActionUpdate:
+			entry.Type = diff.DiffTypeUpdate
+			entry.Current = buildServiceDiscoveryCurrentView(sd)
+			entry.Desired = buildServiceDiscoveryView(sd)
+			plan.Summary.Updates++
+
+		case resources.ServiceDiscoveryActionDelete:
+			entry.Type = diff.DiffTypeDelete
+			entry.Current = buildServiceDiscoveryCurrentView(sd)
+			plan.Summary.Deletes++
+
+		case resources.ServiceDiscoveryActionNoop:
 			entry.Type = diff.DiffTypeNoop
 			plan.Summary.Noops++
 		}
@@ -947,6 +982,45 @@ func buildScheduledTaskTagsView(tags []config.Tag) []ScheduledTaskTagView {
 	})
 
 	return sorted
+}
+
+type ServiceDiscoveryView struct {
+	Name          string `json:"name"`
+	NamespaceArn  string `json:"namespaceArn,omitempty"`
+	NamespaceID   string `json:"namespaceId,omitempty"`
+	DNSRecordType string `json:"dnsRecordType"`
+	DNSTTL        int    `json:"dnsTTL"`
+	RoutingPolicy string `json:"routingPolicy"`
+	Arn           string `json:"arn,omitempty"`
+}
+
+func buildServiceDiscoveryView(sd *resources.ServiceDiscoveryResource) ServiceDiscoveryView {
+	view := ServiceDiscoveryView{}
+	if sd.Desired != nil {
+		view.Name = sd.Desired.Name
+		view.NamespaceArn = sd.Desired.NamespaceArn
+		view.NamespaceID = sd.Desired.NamespaceID
+		view.DNSRecordType = sd.Desired.DNSRecordType
+		view.DNSTTL = sd.Desired.DNSTTL
+		view.RoutingPolicy = sd.Desired.RoutingPolicy
+	}
+	if sd.Arn != "" {
+		view.Arn = sd.Arn
+	}
+	return view
+}
+
+func buildServiceDiscoveryCurrentView(sd *resources.ServiceDiscoveryResource) ServiceDiscoveryView {
+	view := ServiceDiscoveryView{}
+	if sd.Current != nil {
+		view.Name = aws.ToString(sd.Current.Name)
+		view.Arn = aws.ToString(sd.Current.Arn)
+		if sd.Current.DnsConfig != nil && len(sd.Current.DnsConfig.DnsRecords) > 0 {
+			view.DNSRecordType = string(sd.Current.DnsConfig.DnsRecords[0].Type)
+			view.DNSTTL = int(aws.ToInt64(sd.Current.DnsConfig.DnsRecords[0].TTL))
+		}
+	}
+	return view
 }
 
 type TargetGroupView struct {

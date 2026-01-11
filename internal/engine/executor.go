@@ -25,6 +25,7 @@ type Executor struct {
 	logGroupManager     *resources.LogGroupManager
 	targetGroupManager  *resources.TargetGroupManager
 	listenerRuleManager *resources.ListenerRuleManager
+	sdManager           *resources.ServiceDiscoveryManager
 	tracker             *Tracker
 	noWait              bool
 	timeout             time.Duration
@@ -33,19 +34,20 @@ type Executor struct {
 }
 
 type ExecutorConfig struct {
-	ECSClient        *aws.ECSClient
-	SchedulerClient  *aws.SchedulerClient
-	CloudWatchClient *aws.CloudWatchLogsClient
-	ELBV2Client      *aws.ELBV2Client
-	TaskDefManager   *resources.TaskDefManager
-	ServiceManager   *resources.ServiceManager
-	ScheduledManager *resources.ScheduledTaskManager
-	Output           io.Writer
-	NoColor          bool
-	NoWait           bool
-	Timeout          time.Duration
-	MaxParallel      int
-	LogLines         int // -1=all, 0=none, N=limit
+	ECSClient              *aws.ECSClient
+	SchedulerClient        *aws.SchedulerClient
+	CloudWatchClient       *aws.CloudWatchLogsClient
+	ELBV2Client            *aws.ELBV2Client
+	ServiceDiscoveryClient *aws.ServiceDiscoveryClient
+	TaskDefManager         *resources.TaskDefManager
+	ServiceManager         *resources.ServiceManager
+	ScheduledManager       *resources.ScheduledTaskManager
+	Output                 io.Writer
+	NoColor                bool
+	NoWait                 bool
+	Timeout                time.Duration
+	MaxParallel            int
+	LogLines               int // -1=all, 0=none, N=limit
 }
 
 func NewExecutor(cfg ExecutorConfig) *Executor {
@@ -81,6 +83,9 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 		e.targetGroupManager = resources.NewTargetGroupManager(cfg.ELBV2Client)
 		e.listenerRuleManager = resources.NewListenerRuleManager(cfg.ELBV2Client)
 	}
+	if cfg.ServiceDiscoveryClient != nil {
+		e.sdManager = resources.NewServiceDiscoveryManager(cfg.ServiceDiscoveryClient)
+	}
 
 	return e
 }
@@ -92,6 +97,13 @@ func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster str
 	if err := e.applyLogGroups(ctx, plan); err != nil {
 		return fmt.Errorf("failed to apply log groups: %w", err)
 	}
+
+	sdArns, err := e.applyServiceDiscovery(ctx, plan)
+	if err != nil {
+		return fmt.Errorf("failed to apply service discovery: %w", err)
+	}
+
+	e.resolveServiceDiscoveryArns(plan, sdArns)
 
 	// Apply target groups (before services)
 	targetGroupArns, err := e.applyTargetGroups(ctx, plan)
@@ -127,6 +139,68 @@ func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster str
 	}
 
 	return nil
+}
+
+func (e *Executor) applyServiceDiscovery(ctx context.Context, plan *ExecutionPlan) (map[string]string, error) {
+	sdArns := make(map[string]string)
+
+	if e.sdManager == nil || plan.ServiceDiscovery == nil || len(plan.ServiceDiscovery) == 0 {
+		return sdArns, nil
+	}
+
+	e.tracker.PrintSection("\nService Discovery")
+
+	for key, sd := range plan.ServiceDiscovery {
+		e.tracker.AddTask(sd.Name, "service-discovery")
+
+		if sd.Action == resources.ServiceDiscoveryActionNoop {
+			e.tracker.SkipTask(sd.Name, "unchanged")
+			if sd.Arn != "" {
+				sdArns[key] = sd.Arn
+			}
+			continue
+		}
+
+		e.tracker.StartTask(sd.Name)
+
+		if err := e.sdManager.Apply(ctx, sd); err != nil {
+			e.tracker.FailTask(sd.Name, err.Error())
+			return nil, fmt.Errorf("service discovery %s: %w", sd.Name, err)
+		}
+
+		e.tracker.CompleteTask(sd.Name, string(sd.Action))
+
+		if sd.Arn != "" {
+			sdArns[key] = sd.Arn
+		}
+	}
+
+	return sdArns, nil
+}
+
+func (e *Executor) resolveServiceDiscoveryArns(plan *ExecutionPlan, sdArns map[string]string) {
+	if plan == nil || plan.Graph == nil || len(sdArns) == 0 {
+		return
+	}
+
+	for _, node := range plan.Graph.nodes {
+		svc := node.ServiceResource()
+		if svc == nil || svc.Desired == nil {
+			continue
+		}
+
+		for i := range svc.Desired.ServiceRegistries {
+			reg := &svc.Desired.ServiceRegistries[i]
+			if reg.ServiceDiscovery == nil || reg.RegistryArn != "" {
+				continue
+			}
+
+			key := fmt.Sprintf("%s-sd-%d", node.Name, i)
+			if arn, ok := sdArns[key]; ok && arn != "" {
+				reg.RegistryArn = arn
+			}
+		}
+	}
 }
 
 func (e *Executor) refreshTaskDefinitionRefs(plan *ExecutionPlan) {

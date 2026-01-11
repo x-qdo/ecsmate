@@ -260,10 +260,21 @@ type CapacityProviderStrategyItem struct {
 }
 
 type ServiceRegistry struct {
-	RegistryArn   string
-	ContainerName string
-	ContainerPort int
-	Port          int
+	RegistryArn      string
+	ServiceDiscovery *ServiceDiscoveryConfig
+	ContainerName    string
+	ContainerPort    int
+	Port             int
+}
+
+type ServiceDiscoveryConfig struct {
+	NamespaceArn  string
+	NamespaceID   string
+	Name          string
+	DNSRecordType string
+	DNSTTL        int
+	RoutingPolicy string
+	Tags          map[string]string
 }
 
 type NetworkConfiguration struct {
@@ -758,7 +769,46 @@ func parseService(name string, v cue.Value) (Service, error) {
 		if err == nil {
 			for iter.Next() {
 				reg := ServiceRegistry{}
-				if arn, err := ExtractString(iter.Value(), "registryArn"); err == nil {
+				sd := iter.Value().LookupPath(cue.ParsePath("serviceDiscovery"))
+				if sd.Exists() {
+					reg.ServiceDiscovery = &ServiceDiscoveryConfig{
+						DNSRecordType: "A",
+						DNSTTL:        60,
+						RoutingPolicy: "MULTIVALUE",
+					}
+					if ns, err := ExtractString(sd, "namespaceArn"); err == nil {
+						reg.ServiceDiscovery.NamespaceArn = ns
+					}
+					if nsID, err := ExtractString(sd, "namespaceId"); err == nil {
+						reg.ServiceDiscovery.NamespaceID = nsID
+					}
+					if name, err := ExtractString(sd, "name"); err == nil {
+						reg.ServiceDiscovery.Name = name
+					}
+					if dnsType, err := ExtractString(sd, "dnsRecordType"); err == nil {
+						reg.ServiceDiscovery.DNSRecordType = dnsType
+					}
+					if ttl, err := ExtractInt(sd, "dnsTTL"); err == nil {
+						reg.ServiceDiscovery.DNSTTL = int(ttl)
+					}
+					if policy, err := ExtractString(sd, "routingPolicy"); err == nil {
+						reg.ServiceDiscovery.RoutingPolicy = policy
+					}
+					tags := sd.LookupPath(cue.ParsePath("tags"))
+					if tags.Exists() {
+						iter, err := tags.Fields()
+						if err == nil {
+							reg.ServiceDiscovery.Tags = make(map[string]string)
+							for iter.Next() {
+								if val, err := iter.Value().String(); err == nil {
+									key := iter.Selector().String()
+									key = strings.Trim(key, "\"")
+									reg.ServiceDiscovery.Tags[key] = val
+								}
+							}
+						}
+					}
+				} else if arn, err := ExtractString(iter.Value(), "registryArn"); err == nil {
 					reg.RegistryArn = arn
 				}
 				if name, err := ExtractString(iter.Value(), "containerName"); err == nil {

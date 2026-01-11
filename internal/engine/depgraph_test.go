@@ -180,6 +180,47 @@ func TestBuildServiceGraph_InvalidDependency(t *testing.T) {
 	}
 }
 
+func TestBuildResourceGraph_ServiceDiscoveryDependency(t *testing.T) {
+	state := &resources.DesiredState{
+		TaskDefs:       make(map[string]*resources.TaskDefResource),
+		TargetGroups:   make(map[string]*resources.TargetGroupResource),
+		ListenerRules:  make([]*resources.ListenerRuleResource, 0),
+		ScheduledTasks: make(map[string]*resources.ScheduledTaskResource),
+		ServiceDiscovery: map[string]*resources.ServiceDiscoveryResource{
+			"web-sd-0": {
+				Name:   "web",
+				Action: resources.ServiceDiscoveryActionNoop,
+			},
+		},
+		Services: map[string]*resources.ServiceResource{
+			"web": {
+				Name: "web",
+				Desired: &config.Service{
+					Name: "web",
+					ServiceRegistries: []config.ServiceRegistry{
+						{
+							ServiceDiscovery: &config.ServiceDiscoveryConfig{
+								NamespaceArn: "arn:aws:servicediscovery:us-east-1:123:namespace/ns-abc",
+							},
+						},
+					},
+				},
+				Action: resources.ServiceActionNoop,
+			},
+		},
+	}
+
+	graph, err := BuildResourceGraph(state)
+	if err != nil {
+		t.Fatalf("failed to build resource graph: %v", err)
+	}
+
+	deps := graph.GetDependencies("Service/web")
+	if len(deps) != 1 || deps[0] != "ServiceDiscovery/web-sd-0" {
+		t.Fatalf("expected dependency on ServiceDiscovery/web-sd-0, got %v", deps)
+	}
+}
+
 func TestBuildExecutionPlan(t *testing.T) {
 	state := &resources.DesiredState{
 		TaskDefs: map[string]*resources.TaskDefResource{
