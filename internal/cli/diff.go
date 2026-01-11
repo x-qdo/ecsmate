@@ -74,11 +74,12 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	}
 
 	builder := resources.NewResourceBuilderWithConfig(resources.ResourceBuilderConfig{
-		ECSClient:          clients.ECS,
-		SchedulerClient:    clients.Scheduler,
-		AutoScalingClient:  clients.AutoScaling,
-		ELBV2Client:        clients.ELBV2,
-		SchedulerGroupName: manifest.Name,
+		ECSClient:              clients.ECS,
+		SchedulerClient:        clients.Scheduler,
+		AutoScalingClient:      clients.AutoScaling,
+		ELBV2Client:            clients.ELBV2,
+		ServiceDiscoveryClient: clients.ServiceDiscovery,
+		SchedulerGroupName:     manifest.Name,
 	})
 	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
 	if err != nil {
@@ -131,12 +132,13 @@ func loadManifest(ctx context.Context, opts *GlobalOptions, ssmResolver config.S
 }
 
 type AWSClients struct {
-	ECS        *aws.ECSClient
-	Scheduler  *aws.SchedulerClient
-	AutoScaling *aws.AutoScalingClient
-	IAM         *aws.IAMClient
-	ELBV2       *aws.ELBV2Client
-	CloudWatch  *aws.CloudWatchLogsClient
+	ECS              *aws.ECSClient
+	Scheduler        *aws.SchedulerClient
+	AutoScaling      *aws.AutoScalingClient
+	IAM              *aws.IAMClient
+	ELBV2            *aws.ELBV2Client
+	CloudWatch       *aws.CloudWatchLogsClient
+	ServiceDiscovery *aws.ServiceDiscoveryClient
 }
 
 func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.Manifest) (*AWSClients, error) {
@@ -195,6 +197,19 @@ func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.M
 	clients.CloudWatch, err = aws.NewCloudWatchLogsClient(ctx, opts.Region)
 	if err != nil {
 		log.Warn("failed to initialize CloudWatch client", "error", err)
+	}
+
+	for _, svc := range manifest.Services {
+		for _, reg := range svc.ServiceRegistries {
+			if reg.ServiceDiscovery == nil {
+				continue
+			}
+			clients.ServiceDiscovery, err = aws.NewServiceDiscoveryClient(ctx, opts.Region)
+			if err != nil {
+				log.Warn("failed to initialize service discovery client", "error", err)
+			}
+			return clients, nil
+		}
 	}
 
 	return clients, nil

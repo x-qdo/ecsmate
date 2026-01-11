@@ -124,6 +124,11 @@ func collectFromService(svc *Service, refs map[string]struct{}) {
 	}
 	for _, reg := range svc.ServiceRegistries {
 		collectFromString(reg.RegistryArn, refs)
+		if reg.ServiceDiscovery != nil {
+			collectFromString(reg.ServiceDiscovery.NamespaceArn, refs)
+			collectFromString(reg.ServiceDiscovery.NamespaceID, refs)
+			collectFromString(reg.ServiceDiscovery.Name, refs)
+		}
 	}
 }
 
@@ -242,6 +247,12 @@ func replaceInService(svc *Service, values map[string]string) {
 	}
 	for i := range svc.ServiceRegistries {
 		svc.ServiceRegistries[i].RegistryArn = replaceInString(svc.ServiceRegistries[i].RegistryArn, values)
+		if svc.ServiceRegistries[i].ServiceDiscovery != nil {
+			sd := svc.ServiceRegistries[i].ServiceDiscovery
+			sd.NamespaceArn = replaceInString(sd.NamespaceArn, values)
+			sd.NamespaceID = replaceInString(sd.NamespaceID, values)
+			sd.Name = replaceInString(sd.Name, values)
+		}
 	}
 }
 

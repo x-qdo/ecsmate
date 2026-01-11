@@ -87,11 +87,12 @@ func runApply(cmd *cobra.Command, args []string) error {
 	}
 
 	builder := resources.NewResourceBuilderWithConfig(resources.ResourceBuilderConfig{
-		ECSClient:          clients.ECS,
-		SchedulerClient:    clients.Scheduler,
-		AutoScalingClient:  clients.AutoScaling,
-		ELBV2Client:        clients.ELBV2,
-		SchedulerGroupName: manifest.Name,
+		ECSClient:              clients.ECS,
+		SchedulerClient:        clients.Scheduler,
+		AutoScalingClient:      clients.AutoScaling,
+		ELBV2Client:            clients.ELBV2,
+		ServiceDiscoveryClient: clients.ServiceDiscovery,
+		SchedulerGroupName:     manifest.Name,
 	})
 	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
 	if err != nil {
@@ -136,18 +137,19 @@ func runApply(cmd *cobra.Command, args []string) error {
 	}
 
 	executor := engine.NewExecutor(engine.ExecutorConfig{
-		ECSClient:        clients.ECS,
-		SchedulerClient:  clients.Scheduler,
-		CloudWatchClient: clients.CloudWatch,
-		ELBV2Client:      clients.ELBV2,
-		TaskDefManager:   builder.TaskDefManager(),
-		ServiceManager:   builder.ServiceManager(),
-		ScheduledManager: builder.ScheduledTaskManager(),
-		Output:           os.Stdout,
-		NoColor:          opts.NoColor,
-		NoWait:           applyNoWait,
-		Timeout:          applyTimeout,
-		LogLines:         applyLogLines,
+		ECSClient:              clients.ECS,
+		SchedulerClient:        clients.Scheduler,
+		CloudWatchClient:       clients.CloudWatch,
+		ELBV2Client:            clients.ELBV2,
+		ServiceDiscoveryClient: clients.ServiceDiscovery,
+		TaskDefManager:         builder.TaskDefManager(),
+		ServiceManager:         builder.ServiceManager(),
+		ScheduledManager:       builder.ScheduledTaskManager(),
+		Output:                 os.Stdout,
+		NoColor:                opts.NoColor,
+		NoWait:                 applyNoWait,
+		Timeout:                applyTimeout,
+		LogLines:               applyLogLines,
 	})
 
 	if err := executor.Execute(ctx, execPlan, cluster); err != nil {

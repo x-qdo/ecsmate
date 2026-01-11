@@ -98,7 +98,14 @@ func (r *ServiceResource) Validate() error {
 
 	// Validate service registries
 	for i, reg := range svc.ServiceRegistries {
-		if reg.RegistryArn == "" {
+		if reg.ServiceDiscovery != nil {
+			if reg.ServiceDiscovery.NamespaceArn == "" && reg.ServiceDiscovery.NamespaceID == "" {
+				return fmt.Errorf("service %s: serviceRegistries[%d].serviceDiscovery.namespaceArn or namespaceId is required", svc.Name, i)
+			}
+			if reg.RegistryArn == "" {
+				return fmt.Errorf("service %s: serviceRegistries[%d].registryArn is required (service discovery not resolved)", svc.Name, i)
+			}
+		} else if reg.RegistryArn == "" {
 			return fmt.Errorf("service %s: serviceRegistries[%d].registryArn is required", svc.Name, i)
 		}
 	}

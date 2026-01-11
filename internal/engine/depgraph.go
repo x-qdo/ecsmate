@@ -18,7 +18,7 @@ type DependencyGraph struct {
 
 type Node struct {
 	ID       string // Unique identifier: "Type/Name" e.g., "Service/web", "TaskDef/api"
-	Type     string // TaskDef, Service, TargetGroup, ListenerRule, ScheduledTask
+	Type     string // TaskDef, Service, TargetGroup, ListenerRule, ScheduledTask, ServiceDiscovery
 	Name     string
 	Resource interface{} // The actual resource (*ServiceResource, *TaskDefResource, etc.)
 	Action   string      // CREATE, UPDATE, DELETE, RECREATE, NOOP
@@ -134,6 +134,8 @@ func (g *DependencyGraph) getNodeAction(node *Node) string {
 	case *resources.ListenerRuleResource:
 		return string(r.Action)
 	case *resources.ScheduledTaskResource:
+		return string(r.Action)
+	case *resources.ServiceDiscoveryResource:
 		return string(r.Action)
 	}
 	return ""
@@ -272,6 +274,12 @@ func BuildResourceGraph(state *resources.DesiredState) (*DependencyGraph, error)
 		graph.AddNodeWithType(nodeID, "TargetGroup", name, tg)
 	}
 
+	// Add all ServiceDiscovery resources
+	for name, sd := range state.ServiceDiscovery {
+		nodeID := "ServiceDiscovery/" + name
+		graph.AddNodeWithType(nodeID, "ServiceDiscovery", name, sd)
+	}
+
 	// Add all Services with dependencies
 	for name, svc := range state.Services {
 		nodeID := "Service/" + name
@@ -315,6 +323,21 @@ func BuildResourceGraph(state *resources.DesiredState) (*DependencyGraph, error)
 						log.Debug("failed to add TargetGroup edge", "error", err)
 					}
 					break
+				}
+			}
+		}
+
+		// Service → ServiceDiscovery dependencies
+		for i, reg := range svc.Desired.ServiceRegistries {
+			if reg.ServiceDiscovery == nil {
+				continue
+			}
+
+			sdKey := fmt.Sprintf("%s-sd-%d", name, i)
+			sdID := "ServiceDiscovery/" + sdKey
+			if _, ok := graph.GetNode(sdID); ok {
+				if err := graph.AddEdge(sdID, serviceID); err != nil {
+					log.Debug("failed to add ServiceDiscovery edge", "error", err)
 				}
 			}
 		}
@@ -381,18 +404,20 @@ func BuildServiceGraph(state *resources.DesiredState) (*DependencyGraph, error) 
 }
 
 type ExecutionPlan struct {
-	Manifest       *config.Manifest
-	TaskDefs       []*resources.TaskDefResource
-	ServiceLevels  [][]string
-	ScheduledTasks []*resources.ScheduledTaskResource
-	Graph          *DependencyGraph
+	Manifest         *config.Manifest
+	TaskDefs         []*resources.TaskDefResource
+	ServiceLevels    [][]string
+	ScheduledTasks   []*resources.ScheduledTaskResource
+	Graph            *DependencyGraph
+	ServiceDiscovery map[string]*resources.ServiceDiscoveryResource
 }
 
 func BuildExecutionPlan(state *resources.DesiredState) (*ExecutionPlan, error) {
 	plan := &ExecutionPlan{
-		Manifest:       state.Manifest,
-		TaskDefs:       make([]*resources.TaskDefResource, 0),
-		ScheduledTasks: make([]*resources.ScheduledTaskResource, 0),
+		Manifest:         state.Manifest,
+		TaskDefs:         make([]*resources.TaskDefResource, 0),
+		ScheduledTasks:   make([]*resources.ScheduledTaskResource, 0),
+		ServiceDiscovery: state.ServiceDiscovery,
 	}
 
 	for _, td := range state.TaskDefs {

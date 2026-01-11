@@ -41,7 +41,26 @@ package schema
 	containerPort:  int
 }
 
-#ServiceRegistry: {
+#ServiceDiscovery: {
+	namespaceArn?:  string
+	namespaceId?:   string
+	name?:          string
+	dnsRecordType?: "A" | "SRV" | *"A"
+	dnsTTL?:        int & >=0 | *60
+	routingPolicy?: "MULTIVALUE" | "WEIGHTED" | *"MULTIVALUE"
+	tags?:          [string]: string
+}
+
+#ServiceRegistry: #ManagedServiceRegistry | #ExternalServiceRegistry
+
+#ManagedServiceRegistry: {
+	serviceDiscovery: #ServiceDiscovery
+	containerName?:   string
+	containerPort?:   int
+	port?:            int
+}
+
+#ExternalServiceRegistry: {
 	registryArn:     string
 	containerName?:  string
 	containerPort?:  int

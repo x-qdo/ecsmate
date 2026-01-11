@@ -1026,3 +1026,41 @@ func TestPlanner_GeneratePlan_NoPropagationForNoops(t *testing.T) {
 		t.Errorf("expected Service type NOOP when TaskDef is NOOP, got %s", svcEntry.Type)
 	}
 }
+
+func TestPlanner_GeneratePlan_ServiceDiscovery(t *testing.T) {
+	state := &resources.DesiredState{
+		TaskDefs:       make(map[string]*resources.TaskDefResource),
+		Services:       make(map[string]*resources.ServiceResource),
+		ScheduledTasks: make(map[string]*resources.ScheduledTaskResource),
+		ServiceDiscovery: map[string]*resources.ServiceDiscoveryResource{
+			"web-sd-0": {
+				Name: "web",
+				Desired: &resources.ServiceDiscoverySpec{
+					Name:          "web",
+					NamespaceArn:  "arn:aws:servicediscovery:us-east-1:123:namespace/ns-abc",
+					DNSRecordType: "A",
+					DNSTTL:        60,
+					RoutingPolicy: "MULTIVALUE",
+				},
+				Action: resources.ServiceDiscoveryActionCreate,
+			},
+		},
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	found := false
+	for _, entry := range plan.Entries {
+		if entry.Resource == "ServiceDiscovery" && entry.Name == "web-sd-0" {
+			found = true
+			if entry.Type != diff.DiffTypeCreate {
+				t.Fatalf("expected create entry, got %s", entry.Type)
+			}
+		}
+	}
+
+	if !found {
+		t.Fatal("expected service discovery entry")
+	}
+}

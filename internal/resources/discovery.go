@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	awsclient "github.com/qdo/ecsmate/internal/aws"
@@ -20,12 +21,13 @@ const (
 )
 
 type DesiredState struct {
-	Manifest       *config.Manifest
-	TaskDefs       map[string]*TaskDefResource
-	Services       map[string]*ServiceResource
-	ScheduledTasks map[string]*ScheduledTaskResource
-	TargetGroups   map[string]*TargetGroupResource
-	ListenerRules  []*ListenerRuleResource
+	Manifest         *config.Manifest
+	TaskDefs         map[string]*TaskDefResource
+	Services         map[string]*ServiceResource
+	ScheduledTasks   map[string]*ScheduledTaskResource
+	TargetGroups     map[string]*TargetGroupResource
+	ListenerRules    []*ListenerRuleResource
+	ServiceDiscovery map[string]*ServiceDiscoveryResource
 }
 
 type ResourceBuilder struct {
@@ -38,14 +40,16 @@ type ResourceBuilder struct {
 	scheduledManager   *ScheduledTaskManager
 	targetGroupManager *TargetGroupManager
 	listenerRuleMgr    *ListenerRuleManager
+	sdManager          *ServiceDiscoveryManager
 }
 
 type ResourceBuilderConfig struct {
-	ECSClient          *awsclient.ECSClient
-	SchedulerClient    *awsclient.SchedulerClient
-	AutoScalingClient  *awsclient.AutoScalingClient
-	ELBV2Client        *awsclient.ELBV2Client
-	SchedulerGroupName string
+	ECSClient              *awsclient.ECSClient
+	SchedulerClient        *awsclient.SchedulerClient
+	AutoScalingClient      *awsclient.AutoScalingClient
+	ELBV2Client            *awsclient.ELBV2Client
+	ServiceDiscoveryClient *awsclient.ServiceDiscoveryClient
+	SchedulerGroupName     string
 }
 
 func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
@@ -63,6 +67,11 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 		listenerRuleMgr = NewListenerRuleManager(cfg.ELBV2Client)
 	}
 
+	var sdManager *ServiceDiscoveryManager
+	if cfg.ServiceDiscoveryClient != nil {
+		sdManager = NewServiceDiscoveryManager(cfg.ServiceDiscoveryClient)
+	}
+
 	return &ResourceBuilder{
 		ecsClient:          cfg.ECSClient,
 		schedulerClient:    cfg.SchedulerClient,
@@ -73,24 +82,30 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 		scheduledManager:   NewScheduledTaskManager(cfg.SchedulerClient, cfg.SchedulerGroupName),
 		targetGroupManager: targetGroupManager,
 		listenerRuleMgr:    listenerRuleMgr,
+		sdManager:          sdManager,
 	}
 }
 
 // BuildDesiredState constructs the desired state from a manifest and discovers current state from AWS
 func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *config.Manifest, schedulerRoleArn string) (*DesiredState, error) {
 	state := &DesiredState{
-		Manifest:       manifest,
-		TaskDefs:       make(map[string]*TaskDefResource),
-		Services:       make(map[string]*ServiceResource),
-		ScheduledTasks: make(map[string]*ScheduledTaskResource),
-		TargetGroups:   make(map[string]*TargetGroupResource),
-		ListenerRules:  make([]*ListenerRuleResource, 0),
+		Manifest:         manifest,
+		TaskDefs:         make(map[string]*TaskDefResource),
+		Services:         make(map[string]*ServiceResource),
+		ScheduledTasks:   make(map[string]*ScheduledTaskResource),
+		TargetGroups:     make(map[string]*TargetGroupResource),
+		ListenerRules:    make([]*ListenerRuleResource, 0),
+		ServiceDiscovery: make(map[string]*ServiceDiscoveryResource),
 	}
 
 	log.Info("building desired state from manifest", "name", manifest.Name)
 
 	if err := b.buildTaskDefs(ctx, manifest, state); err != nil {
 		return nil, fmt.Errorf("failed to build task definitions: %w", err)
+	}
+
+	if err := b.buildServiceDiscovery(ctx, manifest, state); err != nil {
+		return nil, fmt.Errorf("failed to build service discovery: %w", err)
 	}
 
 	if err := b.buildServices(ctx, manifest, state); err != nil {
@@ -128,6 +143,84 @@ func (b *ResourceBuilder) buildTaskDefs(ctx context.Context, manifest *config.Ma
 	return nil
 }
 
+func (b *ResourceBuilder) buildServiceDiscovery(ctx context.Context, manifest *config.Manifest, state *DesiredState) error {
+	if b.sdManager == nil {
+		return nil
+	}
+
+	specs := ExtractServiceDiscoverySpecs(manifest, manifest.Name)
+	if len(specs) == 0 {
+		return nil
+	}
+
+	namespaceDesired := make(map[string]map[string]bool)
+
+	for key, spec := range specs {
+		log.Debug("building service discovery resource", "name", spec.Name)
+
+		resource, err := b.sdManager.BuildResource(ctx, key, spec)
+		if err != nil {
+			return fmt.Errorf("failed to build service discovery %s: %w", spec.Name, err)
+		}
+
+		state.ServiceDiscovery[key] = resource
+
+		if spec.NamespaceID != "" {
+			if namespaceDesired[spec.NamespaceID] == nil {
+				namespaceDesired[spec.NamespaceID] = make(map[string]bool)
+			}
+			namespaceDesired[spec.NamespaceID][spec.Name] = true
+		}
+	}
+
+	for namespaceID, desiredNames := range namespaceDesired {
+		services, err := b.sdManager.client.ListServicesByNamespace(ctx, namespaceID)
+		if err != nil {
+			log.Debug("failed to list service discovery services", "namespaceID", namespaceID, "error", err)
+			continue
+		}
+
+		for _, svc := range services {
+			svcName := aws.ToString(svc.Name)
+			if desiredNames[svcName] {
+				continue
+			}
+
+			svcArn := aws.ToString(svc.Arn)
+			if svcArn == "" {
+				continue
+			}
+
+			tags, err := b.sdManager.client.ListTagsForResource(ctx, svcArn)
+			if err != nil {
+				log.Debug("failed to list service discovery tags", "arn", svcArn, "error", err)
+				continue
+			}
+
+			if !isOwnedByEcsmate(tags) {
+				continue
+			}
+
+			current, err := b.sdManager.client.GetService(ctx, aws.ToString(svc.Id))
+			if err != nil {
+				log.Debug("failed to get service discovery service", "arn", svcArn, "error", err)
+			}
+
+			key := fmt.Sprintf("orphan-%s-%s", namespaceID, svcName)
+			state.ServiceDiscovery[key] = &ServiceDiscoveryResource{
+				Name:    svcName,
+				Desired: nil,
+				Current: current,
+				Action:  ServiceDiscoveryActionDelete,
+				Arn:     svcArn,
+				ID:      aws.ToString(svc.Id),
+			}
+		}
+	}
+
+	return nil
+}
+
 func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Manifest, state *DesiredState) error {
 	clusterArns := make(map[string]string)
 
@@ -149,6 +242,17 @@ func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Ma
 		}
 
 		svcCopy := svc
+		for i := range svcCopy.ServiceRegistries {
+			reg := &svcCopy.ServiceRegistries[i]
+			if reg.ServiceDiscovery == nil || reg.RegistryArn != "" {
+				continue
+			}
+
+			key := fmt.Sprintf("%s-sd-%d", name, i)
+			if sd, ok := state.ServiceDiscovery[key]; ok && sd != nil && sd.Arn != "" {
+				reg.RegistryArn = sd.Arn
+			}
+		}
 		svcCopy.Name = ecsName
 		resource, err := b.serviceManager.BuildResource(ctx, name, &svcCopy, taskDefArn)
 		if err != nil {
@@ -161,9 +265,71 @@ func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Ma
 			"name", name,
 			"action", resource.Action,
 			"taskDefArn", taskDefArn)
+
+		if b.sdManager != nil && resource.Current != nil {
+			desiredRegistryArns := make(map[string]bool)
+			for _, reg := range svcCopy.ServiceRegistries {
+				if reg.RegistryArn != "" {
+					desiredRegistryArns[reg.RegistryArn] = true
+				}
+			}
+
+			for _, reg := range resource.Current.ServiceRegistries {
+				arn := aws.ToString(reg.RegistryArn)
+				if arn == "" || desiredRegistryArns[arn] {
+					continue
+				}
+				b.addOrphanServiceDiscovery(ctx, state, arn, name)
+			}
+		}
 	}
 
 	return nil
+}
+
+func (b *ResourceBuilder) addOrphanServiceDiscovery(ctx context.Context, state *DesiredState, arn, serviceName string) {
+	if b.sdManager == nil || arn == "" {
+		return
+	}
+
+	serviceID := awsclient.GetServiceIDFromArn(arn)
+	if serviceID == "" {
+		return
+	}
+
+	tags, err := b.sdManager.client.ListTagsForResource(ctx, arn)
+	if err != nil {
+		log.Debug("failed to list service discovery tags", "arn", arn, "error", err)
+		return
+	}
+
+	if !isOwnedByEcsmate(tags) {
+		return
+	}
+
+	current, err := b.sdManager.client.GetService(ctx, serviceID)
+	if err != nil {
+		log.Debug("failed to get service discovery service", "arn", arn, "error", err)
+	}
+
+	name := serviceName
+	if current != nil {
+		name = aws.ToString(current.Name)
+	}
+
+	key := fmt.Sprintf("orphan-%s-%s", serviceName, serviceID)
+	if _, exists := state.ServiceDiscovery[key]; exists {
+		return
+	}
+
+	state.ServiceDiscovery[key] = &ServiceDiscoveryResource{
+		Name:    name,
+		Desired: nil,
+		Current: current,
+		Action:  ServiceDiscoveryActionDelete,
+		Arn:     arn,
+		ID:      serviceID,
+	}
 }
 
 func resolveServiceName(namespace, service string) string {
