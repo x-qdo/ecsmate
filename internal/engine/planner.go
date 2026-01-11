@@ -593,6 +593,7 @@ type ServiceView struct {
 	TaskDefinition                string                `json:"taskDefinition"`
 	DesiredCount                  int                   `json:"desiredCount"`
 	LaunchType                    string                `json:"launchType,omitempty"`
+	EnableExecuteCommand          bool                  `json:"enableExecuteCommand"`
 	HealthCheckGracePeriodSeconds *int                  `json:"healthCheckGracePeriodSeconds,omitempty"`
 	NetworkConfiguration          *NetworkConfigView    `json:"networkConfiguration,omitempty"`
 	LoadBalancers                 []LoadBalancerView    `json:"loadBalancers,omitempty"`
@@ -643,6 +644,7 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 		view.TaskDefinition = svc.TaskDefinitionArn
 		view.DesiredCount = svc.Desired.DesiredCount
 		view.LaunchType = svc.Desired.LaunchType
+		view.EnableExecuteCommand = svc.Desired.EnableExecuteCommand
 		if svc.Desired.HealthCheckGracePeriodSecondsSet {
 			value := svc.Desired.HealthCheckGracePeriodSeconds
 			view.HealthCheckGracePeriodSeconds = &value
@@ -827,6 +829,7 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 		}
 		view.DesiredCount = int(svc.Current.DesiredCount)
 		view.LaunchType = string(svc.Current.LaunchType)
+		view.EnableExecuteCommand = svc.Current.EnableExecuteCommand
 		if svc.Desired != nil && svc.Desired.HealthCheckGracePeriodSecondsSet && svc.Current.HealthCheckGracePeriodSeconds != nil {
 			value := int(*svc.Current.HealthCheckGracePeriodSeconds)
 			view.HealthCheckGracePeriodSeconds = &value

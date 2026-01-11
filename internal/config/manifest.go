@@ -696,6 +696,9 @@ func parseService(name string, v cue.Value) (Service, error) {
 	if lt, err := ExtractString(v, "launchType"); err == nil {
 		svc.LaunchType = lt
 	}
+	if exec, err := ExtractBool(v, "enableExecuteCommand"); err == nil {
+		svc.EnableExecuteCommand = exec
+	}
 	if grace, err := ExtractInt(v, "healthCheckGracePeriodSeconds"); err == nil {
 		svc.HealthCheckGracePeriodSeconds = int(grace)
 		svc.HealthCheckGracePeriodSecondsSet = true

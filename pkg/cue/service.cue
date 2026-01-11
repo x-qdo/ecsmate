@@ -8,7 +8,7 @@ package schema
 	launchType?:          "EC2" | "FARGATE" | "EXTERNAL"
 	capacityProviderStrategy?: [...#CapacityProviderStrategyItem]
 	platformVersion?:     string
-	enableExecuteCommand?: bool
+	enableExecuteCommand:  bool | *true
 	healthCheckGracePeriodSeconds?: int & >=0
 
 	networkConfiguration?: #NetworkConfiguration
