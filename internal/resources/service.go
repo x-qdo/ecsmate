@@ -224,6 +224,9 @@ func (r *ServiceResource) ToUpdateInput() (*ecs.UpdateServiceInput, error) {
 	}
 
 	input.EnableExecuteCommand = aws.Bool(svc.EnableExecuteCommand)
+	if r.Current != nil && r.Current.EnableExecuteCommand != svc.EnableExecuteCommand {
+		input.ForceNewDeployment = true
+	}
 	if svc.HealthCheckGracePeriodSecondsSet {
 		input.HealthCheckGracePeriodSeconds = aws.Int32(int32(svc.HealthCheckGracePeriodSeconds))
 	}
