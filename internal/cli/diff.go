@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	ExitCodeSuccess       = 0
-	ExitCodeError         = 1
-	ExitCodeDiffDetected  = 2
-	ExitCodeRolloutFailed = 3
+	ExitCodeSuccess         = 0
+	ExitCodeError           = 1
+	ExitCodeDiffDetected    = 2
+	ExitCodeRolloutFailed   = 3
+	ExitCodeImageOnlyChange = 4
 )
 
 var diffCmd = &cobra.Command{
@@ -32,7 +33,8 @@ Outputs a colored unified diff showing what would change if apply is run.
 Exit codes:
   0 - No changes detected
   1 - Error occurred
-  2 - Changes detected (useful for CI)`,
+  2 - Changes detected (useful for CI)
+  4 - Image-only changes detected (useful for fast-path deployments)`,
 	RunE: runDiff,
 }
 
@@ -96,6 +98,9 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	renderer.RenderSummary(plan.Summary, manifest.Name)
 
 	if plan.HasChanges() {
+		if plan.HasImageOnlyChanges() {
+			os.Exit(ExitCodeImageOnlyChange)
+		}
 		os.Exit(ExitCodeDiffDetected)
 	}
 

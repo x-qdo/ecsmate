@@ -368,6 +368,27 @@ func TestBuildServiceCurrentView_SortsNetworkConfig(t *testing.T) {
 	}
 }
 
+func TestBuildServiceCurrentView_DeploymentStrategyDefaultsToRolling(t *testing.T) {
+	svc := &resources.ServiceResource{
+		Current: &types.Service{
+			ClusterArn: aws.String("arn:aws:ecs:us-east-1:123456789:cluster/test"),
+			DeploymentConfiguration: &types.DeploymentConfiguration{
+				MinimumHealthyPercent: aws.Int32(100),
+				MaximumPercent:        aws.Int32(200),
+			},
+		},
+	}
+
+	view := buildServiceCurrentView(svc)
+
+	if view.Deployment == nil {
+		t.Fatal("expected deployment config, got nil")
+	}
+	if view.Deployment.Strategy != "rolling" {
+		t.Errorf("expected strategy 'rolling', got %q", view.Deployment.Strategy)
+	}
+}
+
 func TestBuildServiceView_IngressPlaceholder(t *testing.T) {
 	svc := &resources.ServiceResource{
 		Name:              "telemetry",

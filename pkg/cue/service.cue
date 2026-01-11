@@ -19,6 +19,7 @@ package schema
 	dependsOn?: [...string]
 
 	autoScaling?: #AutoScaling
+	hooks?: #Hooks
 }
 
 #CapacityProviderStrategyItem: {
@@ -146,4 +147,21 @@ package schema
 		metricIntervalUpperBound?: number
 		scalingAdjustment:         int
 	}]
+}
+
+#Hooks: {
+	preHook?:  #Hook
+	postHook?: #Hook
+}
+
+#Hook: {
+	taskDefinition: string
+	containerOverrides: [...#HookContainerOverride]
+	timeout?: int & >=60 & <=3600 | *600
+}
+
+#HookContainerOverride: {
+	name:    string
+	command: [...string]
+	environment?: [...#KeyValuePair]
 }

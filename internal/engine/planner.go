@@ -411,6 +411,77 @@ func (plan *Plan) HasChanges() bool {
 	return plan.Summary.Creates > 0 || plan.Summary.Updates > 0 || plan.Summary.Deletes > 0 || plan.Summary.Recreates > 0
 }
 
+// HasImageOnlyChanges returns true if all changes are image-only updates.
+// This means:
+// - All TaskDefinition changes are image-only (only container image fields differ)
+// - All Service/ScheduledTask changes are either:
+//   - Propagated from image-only TaskDefs, or
+//   - Their TaskDef is unchanged (NOOP) - these updates are unrelated to image changes
+//
+// - No other resource types (TargetGroup, ListenerRule, etc.) have changes
+func (plan *Plan) HasImageOnlyChanges() bool {
+	if !plan.HasChanges() {
+		return false
+	}
+
+	imageOnlyTaskDefs := make(map[string]bool)
+	noopTaskDefs := make(map[string]bool)
+
+	// First pass: categorize TaskDefs from state (not entries, as NOOP may be filtered)
+	for name, td := range plan.State.TaskDefs {
+		if td.Action == resources.TaskDefActionNoop {
+			noopTaskDefs[name] = true
+		} else if td.IsImageOnlyChange() {
+			imageOnlyTaskDefs[name] = true
+		}
+	}
+
+	// Second pass: validate all entries
+	for _, entry := range plan.Entries {
+		if entry.Type == diff.DiffTypeNoop {
+			continue
+		}
+
+		switch entry.Resource {
+		case "TaskDefinition":
+			if !imageOnlyTaskDefs[entry.Name] {
+				return false
+			}
+
+		case "Service":
+			svc, ok := plan.State.Services[entry.Name]
+			if !ok || svc.Desired == nil {
+				return false
+			}
+			tdName := svc.Desired.TaskDefinition
+			// Allow if:
+			// - TaskDef is image-only (service updates because of image-only TaskDef change), or
+			// - TaskDef is NOOP (service update is unrelated to TaskDef/image changes)
+			if !imageOnlyTaskDefs[tdName] && !noopTaskDefs[tdName] {
+				return false
+			}
+
+		case "ScheduledTask":
+			task, ok := plan.State.ScheduledTasks[entry.Name]
+			if !ok || task.Desired == nil {
+				return false
+			}
+			tdName := task.Desired.TaskDefinition
+			// Allow if:
+			// - TaskDef is image-only (task updates because of image-only TaskDef change), or
+			// - TaskDef is NOOP (task update is unrelated to TaskDef/image changes)
+			if !imageOnlyTaskDefs[tdName] && !noopTaskDefs[tdName] {
+				return false
+			}
+
+		default:
+			return false
+		}
+	}
+
+	return len(imageOnlyTaskDefs) > 0
+}
+
 type TaskDefView struct {
 	Type                    string             `json:"type"`
 	Family                  string             `json:"family,omitempty"`
@@ -599,6 +670,18 @@ type ServiceView struct {
 	LoadBalancers                 []LoadBalancerView    `json:"loadBalancers,omitempty"`
 	ServiceRegistries             []ServiceRegistryView `json:"serviceRegistries,omitempty"`
 	Deployment                    *DeploymentConfigView `json:"deployment,omitempty"`
+	Hooks                         *HooksView            `json:"hooks,omitempty"`
+}
+
+type HooksView struct {
+	PreHook  *HookView `json:"preHook,omitempty"`
+	PostHook *HookView `json:"postHook,omitempty"`
+}
+
+type HookView struct {
+	TaskDefinition string   `json:"taskDefinition"`
+	Command        []string `json:"command,omitempty"`
+	Timeout        int      `json:"timeout,omitempty"`
 }
 
 type NetworkConfigView struct {
@@ -678,8 +761,12 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 		addIngressLoadBalancerPlaceholders(&view, svc.Desired, ingress, svc.Name, targetGroups, manifestName)
 		addTaskDefinitionPlaceholder(&view, svc.Desired, taskDefs)
 
+		strategy := svc.Desired.Deployment.Strategy
+		if strategy == "" {
+			strategy = "rolling"
+		}
 		view.Deployment = &DeploymentConfigView{
-			Strategy:               svc.Desired.Deployment.Strategy,
+			Strategy:               strategy,
 			CircuitBreakerEnable:   svc.Desired.Deployment.CircuitBreakerEnable,
 			CircuitBreakerRollback: svc.Desired.Deployment.CircuitBreakerRollback,
 		}
@@ -691,8 +778,42 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 			value := svc.Desired.Deployment.MaximumPercent
 			view.Deployment.MaximumPercent = &value
 		}
+
+		// Add hooks to view
+		if svc.Desired.Hooks != nil {
+			view.Hooks = buildHooksView(svc.Desired.Hooks)
+		}
 	}
 
+	return view
+}
+
+func buildHooksView(hooks *config.Hooks) *HooksView {
+	if hooks == nil {
+		return nil
+	}
+	view := &HooksView{}
+	if hooks.PreHook != nil {
+		view.PreHook = buildHookView(hooks.PreHook)
+	}
+	if hooks.PostHook != nil {
+		view.PostHook = buildHookView(hooks.PostHook)
+	}
+	return view
+}
+
+func buildHookView(hook *config.Hook) *HookView {
+	if hook == nil {
+		return nil
+	}
+	view := &HookView{
+		TaskDefinition: hook.TaskDefinition,
+		Timeout:        hook.Timeout,
+	}
+	// Get command from first container override
+	if len(hook.ContainerOverrides) > 0 && len(hook.ContainerOverrides[0].Command) > 0 {
+		view.Command = hook.ContainerOverrides[0].Command
+	}
 	return view
 }
 
@@ -877,7 +998,9 @@ func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {
 
 		if svc.Current.DeploymentConfiguration != nil {
 			dc := svc.Current.DeploymentConfiguration
-			view.Deployment = &DeploymentConfigView{}
+			view.Deployment = &DeploymentConfigView{
+				Strategy: "rolling",
+			}
 			if dc.MinimumHealthyPercent != nil {
 				value := int(*dc.MinimumHealthyPercent)
 				view.Deployment.MinimumHealthyPercent = &value
