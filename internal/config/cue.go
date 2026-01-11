@@ -14,6 +14,7 @@ import (
 	"cuelang.org/go/cue/load"
 
 	"github.com/qdo/ecsmate/internal/log"
+	schema "github.com/qdo/ecsmate/pkg/cue"
 )
 
 // Schema files are loaded from pkg/cue at runtime
@@ -36,12 +37,21 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	cfg := &load.Config{
 		Dir: manifestPath,
 	}
-	if moduleRoot, modulePath, err := findModuleRoot(manifestPath); err != nil {
+	moduleRoot, modulePath, err := findModuleRoot(manifestPath)
+	if err != nil {
 		return cue.Value{}, err
-	} else if moduleRoot != "" && modulePath != "" {
-		cfg.ModuleRoot = moduleRoot
-		cfg.Module = modulePath
 	}
+
+	// Use virtual module root if no real one found
+	if moduleRoot == "" || modulePath == "" {
+		moduleRoot = "/virtual/ecsmate"
+		modulePath = "github.com/qdo/ecsmate"
+	}
+	cfg.ModuleRoot = moduleRoot
+	cfg.Module = modulePath
+
+	// Build overlay with embedded schema files
+	cfg.Overlay = buildSchemaOverlay(moduleRoot)
 
 	// Determine which files to load
 	var files []string
@@ -433,4 +443,35 @@ func IsManifestConstrained(value cue.Value) bool {
 	// the expected structure from #Manifest (name field is required)
 	name := manifest.LookupPath(cue.ParsePath("name"))
 	return name.Exists() && name.Err() == nil
+}
+
+// buildSchemaOverlay creates a CUE overlay with embedded schema files.
+// This allows schema imports to work regardless of where ecsmate is invoked.
+func buildSchemaOverlay(moduleRoot string) map[string]load.Source {
+	overlay := make(map[string]load.Source)
+
+	// Add module.cue to establish module identity
+	moduleCue := `module: "github.com/qdo/ecsmate"
+language: { version: "v0.11.0" }`
+	overlay[filepath.Join(moduleRoot, "cue.mod", "module.cue")] = load.FromString(moduleCue)
+
+	// Add embedded schema files from pkg/cue
+	schemaDir := filepath.Join(moduleRoot, "pkg", "cue")
+	entries, err := schema.EmbeddedSchema.ReadDir(".")
+	if err != nil {
+		return overlay
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".cue") {
+			continue
+		}
+		content, err := schema.EmbeddedSchema.ReadFile(entry.Name())
+		if err != nil {
+			continue
+		}
+		overlay[filepath.Join(schemaDir, entry.Name())] = load.FromBytes(content)
+	}
+
+	return overlay
 }
