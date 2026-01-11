@@ -141,7 +141,9 @@ interactive TTY, it re-renders service deployment progress in place, including:
 In non-interactive output, it prints events and state changes as log lines.
 
 ## Manifest format
-Manifests are defined in CUE. Import the schema from `pkg/cue`.
+Manifests are defined in CUE. Import the schema from `pkg/cue`. The schema is
+embedded in the binary, so ecsmate can be run from any directory without needing
+access to the ecsmate source tree.
 
 Basic shape:
 ```cue
