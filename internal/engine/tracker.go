@@ -86,6 +86,8 @@ type Tracker struct {
 	// Interactive mode support
 	interactive     bool
 	serviceProgress map[string]*ServiceProgressState
+	serviceOrder    []string
+	lastTotalLines  int
 	lastStateHash   map[string]string // for non-interactive change detection
 }
 
@@ -113,6 +115,7 @@ func NewTracker(out io.Writer, noColor bool) *Tracker {
 		dimColor:        color.New(color.FgWhite),
 		interactive:     interactive,
 		serviceProgress: make(map[string]*ServiceProgressState),
+		serviceOrder:    make([]string, 0),
 		lastStateHash:   make(map[string]string),
 	}
 }
@@ -204,18 +207,40 @@ func (t *Tracker) clearServiceProgress(serviceName string) {
 		return
 	}
 
-	state, ok := t.serviceProgress[serviceName]
-	if !ok || state.LastLines == 0 {
+	_, ok := t.serviceProgress[serviceName]
+	if !ok {
 		return
 	}
 
-	// Move cursor up and clear each line
-	for i := 0; i < state.LastLines; i++ {
-		fmt.Fprintf(t.out, "\033[A\033[2K")
+	// Clear previous combined output
+	if t.lastTotalLines > 0 {
+		for i := 0; i < t.lastTotalLines; i++ {
+			fmt.Fprintf(t.out, "\033[A\033[2K")
+		}
 	}
 
 	// Remove from tracking
 	delete(t.serviceProgress, serviceName)
+	newOrder := make([]string, 0, len(t.serviceOrder)-1)
+	for _, name := range t.serviceOrder {
+		if name != serviceName {
+			newOrder = append(newOrder, name)
+		}
+	}
+	t.serviceOrder = newOrder
+
+	// Re-render remaining services
+	totalLines := 0
+	for _, name := range t.serviceOrder {
+		state := t.serviceProgress[name]
+		if state != nil {
+			lines := t.renderServiceProgress(state)
+			state.LastLines = lines
+			totalLines += lines
+		}
+	}
+
+	t.lastTotalLines = totalLines
 }
 
 func (t *Tracker) printTaskStart(task *TrackedTask) {
@@ -422,13 +447,13 @@ func (t *Tracker) updateServiceProgressInteractive(update ServiceProgressUpdate)
 	if !exists {
 		state = &ServiceProgressState{ServiceName: update.ServiceName}
 		t.serviceProgress[update.ServiceName] = state
+		t.serviceOrder = append(t.serviceOrder, update.ServiceName)
 	}
 
-	// Clear previous output if we rendered before
-	if state.LastLines > 0 {
-		log.Debug("clearing service progress", "service", update.ServiceName, "lines", state.LastLines)
-		// Move cursor up and clear each line
-		for i := 0; i < state.LastLines; i++ {
+	// Clear previous combined output
+	if t.lastTotalLines > 0 {
+		log.Debug("clearing combined service progress", "lines", t.lastTotalLines)
+		for i := 0; i < t.lastTotalLines; i++ {
 			fmt.Fprintf(t.out, "\033[A\033[2K")
 		}
 	} else {
@@ -452,10 +477,19 @@ func (t *Tracker) updateServiceProgressInteractive(update ServiceProgressUpdate)
 		state.Events = append(update.Events, state.Events...)
 	}
 
-	// Render and count lines
-	lines := t.renderServiceProgress(state)
-	state.LastLines = lines
-	log.Debug("rendered service progress", "service", update.ServiceName, "lines", lines, "events", len(state.Events))
+	// Render and count lines for all services
+	totalLines := 0
+	for _, serviceName := range t.serviceOrder {
+		svcState := t.serviceProgress[serviceName]
+		if svcState != nil {
+			lines := t.renderServiceProgress(svcState)
+			svcState.LastLines = lines
+			totalLines += lines
+		}
+	}
+
+	t.lastTotalLines = totalLines
+	log.Debug("rendered combined service progress", "services", len(t.serviceOrder), "totalLines", totalLines)
 }
 
 func (t *Tracker) updateServiceProgressNonInteractive(update ServiceProgressUpdate) {

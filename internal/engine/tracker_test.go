@@ -243,6 +243,159 @@ func TestInteractiveRerender(t *testing.T) {
 	}
 }
 
+func TestMultiServiceRendering(t *testing.T) {
+	buf := &bytes.Buffer{}
+	tracker := NewTracker(buf, true)
+	tracker.interactive = true
+
+	now := time.Now()
+
+	// First service starts
+	tracker.UpdateServiceProgress(ServiceProgressUpdate{
+		ServiceName:    "service-a",
+		DesiredCount:   1,
+		RunningCount:   0,
+		RolloutState:   "IN_PROGRESS",
+		TaskDefinition: "service-a:1",
+		Events: []EventInfo{
+			{Timestamp: now, Message: "Event A1"},
+		},
+	})
+
+	firstOutput := buf.String()
+	firstLines := strings.Count(firstOutput, "\n")
+
+	// Verify service-a is tracked
+	if len(tracker.serviceOrder) != 1 || tracker.serviceOrder[0] != "service-a" {
+		t.Errorf("expected serviceOrder=['service-a'], got %v", tracker.serviceOrder)
+	}
+	if tracker.lastTotalLines != firstLines {
+		t.Errorf("lastTotalLines=%d, expected %d", tracker.lastTotalLines, firstLines)
+	}
+
+	// Second service starts
+	buf.Reset()
+	tracker.UpdateServiceProgress(ServiceProgressUpdate{
+		ServiceName:    "service-b",
+		DesiredCount:   1,
+		RunningCount:   0,
+		RolloutState:   "IN_PROGRESS",
+		TaskDefinition: "service-b:1",
+		Events: []EventInfo{
+			{Timestamp: now, Message: "Event B1"},
+		},
+	})
+
+	secondOutput := buf.String()
+
+	// Should clear the first service's lines before rendering both
+	escapeCount := strings.Count(secondOutput, "\033[A\033[2K")
+	if escapeCount != firstLines {
+		t.Errorf("expected %d escape sequences (to clear service-a), got %d", firstLines, escapeCount)
+	}
+
+	// Verify both services are tracked
+	if len(tracker.serviceOrder) != 2 {
+		t.Errorf("expected 2 services, got %d", len(tracker.serviceOrder))
+	}
+
+	// lastTotalLines should now include both services
+	if tracker.lastTotalLines <= firstLines {
+		t.Errorf("lastTotalLines=%d should be greater than single service lines=%d", tracker.lastTotalLines, firstLines)
+	}
+
+	// Service A updates - should clear all and re-render both
+	prevTotalLines := tracker.lastTotalLines
+	buf.Reset()
+	tracker.UpdateServiceProgress(ServiceProgressUpdate{
+		ServiceName:    "service-a",
+		DesiredCount:   1,
+		RunningCount:   1,
+		RolloutState:   "COMPLETED",
+		TaskDefinition: "service-a:1",
+		Events: []EventInfo{
+			{Timestamp: now.Add(time.Second), Message: "Event A2"},
+		},
+	})
+
+	thirdOutput := buf.String()
+	escapeCount = strings.Count(thirdOutput, "\033[A\033[2K")
+	if escapeCount != prevTotalLines {
+		t.Errorf("expected %d escape sequences (to clear both services), got %d", prevTotalLines, escapeCount)
+	}
+
+	// Both services should still be rendered
+	if !strings.Contains(thirdOutput, "service-a") || !strings.Contains(thirdOutput, "service-b") {
+		t.Errorf("output should contain both services\nOutput:\n%s", thirdOutput)
+	}
+}
+
+func TestMultiServiceCompletion(t *testing.T) {
+	buf := &bytes.Buffer{}
+	tracker := NewTracker(buf, true)
+	tracker.interactive = true
+
+	now := time.Now()
+
+	// Start two services
+	tracker.UpdateServiceProgress(ServiceProgressUpdate{
+		ServiceName:    "service-a",
+		DesiredCount:   1,
+		RunningCount:   0,
+		RolloutState:   "IN_PROGRESS",
+		TaskDefinition: "service-a:1",
+		Events: []EventInfo{
+			{Timestamp: now, Message: "Event A1"},
+		},
+	})
+
+	tracker.UpdateServiceProgress(ServiceProgressUpdate{
+		ServiceName:    "service-b",
+		DesiredCount:   1,
+		RunningCount:   0,
+		RolloutState:   "IN_PROGRESS",
+		TaskDefinition: "service-b:1",
+		Events: []EventInfo{
+			{Timestamp: now, Message: "Event B1"},
+		},
+	})
+
+	prevTotalLines := tracker.lastTotalLines
+
+	// Complete service-a
+	tracker.AddTask("service-a", "service")
+	tracker.StartTask("service-a")
+	buf.Reset()
+	tracker.CompleteTask("service-a", "deployed")
+
+	output := buf.String()
+	escapeCount := strings.Count(output, "\033[A\033[2K")
+
+	// Should clear all previous lines
+	if escapeCount != prevTotalLines {
+		t.Errorf("expected %d escape sequences, got %d", prevTotalLines, escapeCount)
+	}
+
+	// service-a should be removed from tracking
+	if _, ok := tracker.serviceProgress["service-a"]; ok {
+		t.Error("service-a should be removed from serviceProgress")
+	}
+
+	// service-b should still be tracked and rendered
+	if _, ok := tracker.serviceProgress["service-b"]; !ok {
+		t.Error("service-b should still be in serviceProgress")
+	}
+
+	if len(tracker.serviceOrder) != 1 || tracker.serviceOrder[0] != "service-b" {
+		t.Errorf("expected serviceOrder=['service-b'], got %v", tracker.serviceOrder)
+	}
+
+	// Output should contain service-b re-rendered (after escapes and completion message)
+	if !strings.Contains(output, "service-b") {
+		t.Errorf("output should contain service-b progress\nOutput:\n%s", output)
+	}
+}
+
 func TestPollingSimulation(t *testing.T) {
 	buf := &bytes.Buffer{}
 	tracker := NewTracker(buf, true)
