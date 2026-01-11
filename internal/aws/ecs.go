@@ -342,12 +342,12 @@ type TaskInfo struct {
 
 // ContainerInfo contains information about a container in a task
 type ContainerInfo struct {
-	Name         string
-	LastStatus   string
-	ExitCode     *int32
-	Reason       string
-	RuntimeID    string
-	LogGroupName string
+	Name            string
+	LastStatus      string
+	ExitCode        *int32
+	Reason          string
+	RuntimeID       string
+	LogGroupName    string
 	LogStreamPrefix string
 }
 
@@ -450,4 +450,140 @@ func extractTaskIDFromArn(arn string) string {
 		return arn[idx+1:]
 	}
 	return arn
+}
+
+// ExtractTaskIDFromArn extracts task ID from ARN (exported version)
+func ExtractTaskIDFromArn(arn string) string {
+	return extractTaskIDFromArn(arn)
+}
+
+// RunTaskInput contains parameters for running an ECS task
+type RunTaskInput struct {
+	TaskDefinition       string
+	LaunchType           string
+	PlatformVersion      string
+	NetworkConfiguration *types.NetworkConfiguration
+	Overrides            *types.TaskOverride
+	Count                int32
+	Group                string
+}
+
+// RunTaskOutput contains the result of running an ECS task
+type RunTaskOutput struct {
+	TaskArns []string
+	Tasks    []TaskInfo
+	Failures []types.Failure
+}
+
+// RunTask runs an ECS task and returns task ARNs
+func (c *ECSClient) RunTask(ctx context.Context, input *RunTaskInput) (*RunTaskOutput, error) {
+	log.Debug("running task", "cluster", c.cluster, "taskDef", input.TaskDefinition)
+
+	count := input.Count
+	if count == 0 {
+		count = 1
+	}
+
+	ecsInput := &ecs.RunTaskInput{
+		Cluster:        aws.String(c.cluster),
+		TaskDefinition: aws.String(input.TaskDefinition),
+		Count:          aws.Int32(count),
+	}
+
+	if input.LaunchType != "" {
+		ecsInput.LaunchType = types.LaunchType(input.LaunchType)
+	}
+	if input.PlatformVersion != "" {
+		ecsInput.PlatformVersion = aws.String(input.PlatformVersion)
+	}
+	if input.NetworkConfiguration != nil {
+		ecsInput.NetworkConfiguration = input.NetworkConfiguration
+	}
+	if input.Overrides != nil {
+		ecsInput.Overrides = input.Overrides
+	}
+	if input.Group != "" {
+		ecsInput.Group = aws.String(input.Group)
+	}
+
+	out, err := c.client.RunTask(ctx, ecsInput)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run task: %w", err)
+	}
+
+	result := &RunTaskOutput{
+		Failures: out.Failures,
+	}
+
+	for _, task := range out.Tasks {
+		arn := aws.ToString(task.TaskArn)
+		result.TaskArns = append(result.TaskArns, arn)
+		result.Tasks = append(result.Tasks, TaskInfo{
+			TaskArn:           arn,
+			TaskID:            extractTaskIDFromArn(arn),
+			TaskDefinitionArn: aws.ToString(task.TaskDefinitionArn),
+			LastStatus:        aws.ToString(task.LastStatus),
+			DesiredStatus:     aws.ToString(task.DesiredStatus),
+		})
+	}
+
+	if len(out.Failures) > 0 {
+		var reasons []string
+		for _, f := range out.Failures {
+			reasons = append(reasons, aws.ToString(f.Reason))
+		}
+		return result, fmt.Errorf("task launch failures: %s", strings.Join(reasons, ", "))
+	}
+
+	return result, nil
+}
+
+// WaitForTaskStopped waits for a task to reach STOPPED status
+func (c *ECSClient) WaitForTaskStopped(ctx context.Context, taskArn string, timeout time.Duration) (*TaskInfo, error) {
+	log.Debug("waiting for task to stop", "task", taskArn)
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timeout waiting for task to stop")
+		case <-ticker.C:
+			tasks, err := c.DescribeTasks(ctx, []string{taskArn})
+			if err != nil {
+				log.Debug("failed to describe task", "error", err)
+				continue
+			}
+
+			if len(tasks) == 0 {
+				return nil, fmt.Errorf("task not found: %s", taskArn)
+			}
+
+			task := &tasks[0]
+			if task.LastStatus == "STOPPED" {
+				return task, nil
+			}
+
+			log.Debug("task status", "task", task.TaskID, "status", task.LastStatus)
+		}
+	}
+}
+
+// GetTaskExitCode returns the exit code of the main container
+func GetTaskExitCode(task *TaskInfo) (int, error) {
+	if task == nil {
+		return -1, fmt.Errorf("task is nil")
+	}
+
+	for _, container := range task.Containers {
+		if container.ExitCode != nil {
+			return int(*container.ExitCode), nil
+		}
+	}
+
+	return -1, fmt.Errorf("no exit code found")
 }

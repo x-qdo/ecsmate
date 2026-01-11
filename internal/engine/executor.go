@@ -26,6 +26,7 @@ type Executor struct {
 	targetGroupManager  *resources.TargetGroupManager
 	listenerRuleManager *resources.ListenerRuleManager
 	sdManager           *resources.ServiceDiscoveryManager
+	hookExecutor        *resources.HookExecutor
 	tracker             *Tracker
 	noWait              bool
 	timeout             time.Duration
@@ -85,6 +86,9 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 	}
 	if cfg.ServiceDiscoveryClient != nil {
 		e.sdManager = resources.NewServiceDiscoveryManager(cfg.ServiceDiscoveryClient)
+	}
+	if cfg.ECSClient != nil {
+		e.hookExecutor = resources.NewHookExecutor(cfg.ECSClient, cfg.CloudWatchClient)
 	}
 
 	return e
@@ -443,6 +447,11 @@ func (e *Executor) deployServices(ctx context.Context, plan *ExecutionPlan) erro
 	for levelIdx, level := range plan.ServiceLevels {
 		log.Debug("deploying service level", "level", levelIdx, "services", level)
 
+		// Run pre-hooks for this level
+		if err := e.runPreHooks(ctx, plan, level); err != nil {
+			return err
+		}
+
 		var wg sync.WaitGroup
 		errors := make(chan error, len(level))
 
@@ -506,6 +515,9 @@ func (e *Executor) deployServices(ctx context.Context, plan *ExecutionPlan) erro
 		for err := range errors {
 			return err
 		}
+
+		// Run post-hooks for this level after successful deployment
+		e.runPostHooks(ctx, plan, level)
 	}
 
 	return nil
@@ -865,6 +877,142 @@ func (e *Executor) resolveIngressTargetGroups(plan *ExecutionPlan, targetGroupAr
 		*svc.Desired = updated
 		svc.RecalculateAction()
 	}
+}
+
+// runPreHooks runs pre-deployment hooks for services in the given level
+func (e *Executor) runPreHooks(ctx context.Context, plan *ExecutionPlan, serviceNames []string) error {
+	if e.hookExecutor == nil {
+		return nil
+	}
+
+	for _, serviceName := range serviceNames {
+		node, ok := plan.Graph.GetNode(serviceName)
+		if !ok {
+			continue
+		}
+
+		svc := node.ServiceResource()
+		if svc == nil || svc.Desired == nil || svc.Desired.Hooks == nil {
+			continue
+		}
+
+		// Skip hooks if service is not being deployed
+		if svc.Action == resources.ServiceActionNoop {
+			continue
+		}
+
+		hook := svc.Desired.Hooks.PreHook
+		if hook == nil {
+			continue
+		}
+
+		// Resolve task definition ARN
+		taskDefArn := e.resolveHookTaskDefArn(plan, hook.TaskDefinition)
+		if taskDefArn == "" {
+			return fmt.Errorf("pre-hook task definition not found: %s", hook.TaskDefinition)
+		}
+
+		// Show hook in tracker
+		hookName := fmt.Sprintf("%s/pre-hook", serviceName)
+		e.tracker.AddTask(hookName, "hook")
+		e.tracker.StartTask(hookName)
+
+		// Execute hook
+		result, err := e.hookExecutor.ExecuteHook(
+			ctx,
+			resources.HookTypePre,
+			serviceName,
+			hook,
+			taskDefArn,
+			svc.Desired.NetworkConfiguration,
+			svc.Desired.LaunchType,
+			svc.Desired.PlatformVersion,
+		)
+
+		if err != nil {
+			e.tracker.FailTask(hookName, err.Error())
+			if result != nil && len(result.Logs) > 0 {
+				e.tracker.PrintLogs(hookName, result.Logs)
+			}
+			return fmt.Errorf("pre-hook failed for %s: %w", serviceName, err)
+		}
+
+		e.tracker.CompleteTask(hookName, fmt.Sprintf("exit 0 [%s]", result.Duration.Round(time.Second)))
+	}
+
+	return nil
+}
+
+// runPostHooks runs post-deployment hooks (logs errors but doesn't fail deployment)
+func (e *Executor) runPostHooks(ctx context.Context, plan *ExecutionPlan, serviceNames []string) {
+	if e.hookExecutor == nil {
+		return
+	}
+
+	for _, serviceName := range serviceNames {
+		node, ok := plan.Graph.GetNode(serviceName)
+		if !ok {
+			continue
+		}
+
+		svc := node.ServiceResource()
+		if svc == nil || svc.Desired == nil || svc.Desired.Hooks == nil {
+			continue
+		}
+
+		// Skip hooks if service was not deployed
+		if svc.Action == resources.ServiceActionNoop {
+			continue
+		}
+
+		hook := svc.Desired.Hooks.PostHook
+		if hook == nil {
+			continue
+		}
+
+		taskDefArn := e.resolveHookTaskDefArn(plan, hook.TaskDefinition)
+		if taskDefArn == "" {
+			log.Warn("post-hook task definition not found", "service", serviceName, "taskDef", hook.TaskDefinition)
+			continue
+		}
+
+		hookName := fmt.Sprintf("%s/post-hook", serviceName)
+		e.tracker.AddTask(hookName, "hook")
+		e.tracker.StartTask(hookName)
+
+		result, err := e.hookExecutor.ExecuteHook(
+			ctx,
+			resources.HookTypePost,
+			serviceName,
+			hook,
+			taskDefArn,
+			svc.Desired.NetworkConfiguration,
+			svc.Desired.LaunchType,
+			svc.Desired.PlatformVersion,
+		)
+
+		if err != nil {
+			e.tracker.FailTask(hookName, err.Error())
+			if result != nil && len(result.Logs) > 0 {
+				e.tracker.PrintLogs(hookName, result.Logs)
+			}
+			// Post-hook failure is logged but doesn't stop deployment
+			log.Warn("post-hook failed", "service", serviceName, "error", err)
+			continue
+		}
+
+		e.tracker.CompleteTask(hookName, fmt.Sprintf("exit 0 [%s]", result.Duration.Round(time.Second)))
+	}
+}
+
+// resolveHookTaskDefArn finds the ARN for a hook's task definition
+func (e *Executor) resolveHookTaskDefArn(plan *ExecutionPlan, taskDefName string) string {
+	for _, td := range plan.TaskDefs {
+		if td.Name == taskDefName {
+			return td.ResolvedArn
+		}
+	}
+	return ""
 }
 
 // printFailureLogs fetches stopped tasks via API and prints their logs

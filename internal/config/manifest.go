@@ -251,6 +251,24 @@ type Service struct {
 	Deployment                       DeploymentConfig
 	DependsOn                        []string
 	AutoScaling                      *AutoScalingConfig
+	Hooks                            *Hooks
+}
+
+type Hooks struct {
+	PreHook  *Hook
+	PostHook *Hook
+}
+
+type Hook struct {
+	TaskDefinition     string
+	ContainerOverrides []HookContainerOverride
+	Timeout            int // seconds, default 600
+}
+
+type HookContainerOverride struct {
+	Name        string
+	Command     []string
+	Environment []KeyValuePair
 }
 
 type CapacityProviderStrategyItem struct {
@@ -886,7 +904,95 @@ func parseService(name string, v cue.Value) (Service, error) {
 		}
 	}
 
+	// Parse hooks
+	hooks := v.LookupPath(cue.ParsePath("hooks"))
+	if hooks.Exists() {
+		h, err := parseHooks(hooks)
+		if err != nil {
+			return svc, fmt.Errorf("failed to parse hooks: %w", err)
+		}
+		svc.Hooks = h
+	}
+
 	return svc, nil
+}
+
+func parseHooks(v cue.Value) (*Hooks, error) {
+	hooks := &Hooks{}
+
+	preHook := v.LookupPath(cue.ParsePath("preHook"))
+	if preHook.Exists() {
+		h, err := parseHook(preHook)
+		if err != nil {
+			return nil, fmt.Errorf("preHook: %w", err)
+		}
+		hooks.PreHook = h
+	}
+
+	postHook := v.LookupPath(cue.ParsePath("postHook"))
+	if postHook.Exists() {
+		h, err := parseHook(postHook)
+		if err != nil {
+			return nil, fmt.Errorf("postHook: %w", err)
+		}
+		hooks.PostHook = h
+	}
+
+	return hooks, nil
+}
+
+func parseHook(v cue.Value) (*Hook, error) {
+	hook := &Hook{Timeout: 600} // default timeout
+
+	if td, err := ExtractString(v, "taskDefinition"); err == nil {
+		hook.TaskDefinition = td
+	} else {
+		return nil, fmt.Errorf("taskDefinition is required")
+	}
+
+	if timeout, err := ExtractInt(v, "timeout"); err == nil {
+		hook.Timeout = int(timeout)
+	}
+
+	// Parse container overrides
+	overrides := v.LookupPath(cue.ParsePath("containerOverrides"))
+	if overrides.Exists() {
+		iter, err := overrides.List()
+		if err != nil {
+			return nil, fmt.Errorf("failed to iterate containerOverrides: %w", err)
+		}
+		for iter.Next() {
+			co := HookContainerOverride{}
+			if name, err := ExtractString(iter.Value(), "name"); err == nil {
+				co.Name = name
+			}
+			if command, err := ExtractStringSlice(iter.Value(), "command"); err == nil {
+				co.Command = command
+			}
+
+			// Parse environment
+			env := iter.Value().LookupPath(cue.ParsePath("environment"))
+			if env.Exists() {
+				envIter, err := env.List()
+				if err == nil {
+					for envIter.Next() {
+						kv := KeyValuePair{}
+						if key, err := ExtractString(envIter.Value(), "name"); err == nil {
+							kv.Name = key
+						}
+						if val, err := ExtractString(envIter.Value(), "value"); err == nil {
+							kv.Value = val
+						}
+						co.Environment = append(co.Environment, kv)
+					}
+				}
+			}
+
+			hook.ContainerOverrides = append(hook.ContainerOverrides, co)
+		}
+	}
+
+	return hook, nil
 }
 
 func parseScheduledTask(name string, v cue.Value) (ScheduledTask, error) {

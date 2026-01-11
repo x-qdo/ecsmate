@@ -670,6 +670,18 @@ type ServiceView struct {
 	LoadBalancers                 []LoadBalancerView    `json:"loadBalancers,omitempty"`
 	ServiceRegistries             []ServiceRegistryView `json:"serviceRegistries,omitempty"`
 	Deployment                    *DeploymentConfigView `json:"deployment,omitempty"`
+	Hooks                         *HooksView            `json:"hooks,omitempty"`
+}
+
+type HooksView struct {
+	PreHook  *HookView `json:"preHook,omitempty"`
+	PostHook *HookView `json:"postHook,omitempty"`
+}
+
+type HookView struct {
+	TaskDefinition string   `json:"taskDefinition"`
+	Command        []string `json:"command,omitempty"`
+	Timeout        int      `json:"timeout,omitempty"`
 }
 
 type NetworkConfigView struct {
@@ -766,8 +778,42 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 			value := svc.Desired.Deployment.MaximumPercent
 			view.Deployment.MaximumPercent = &value
 		}
+
+		// Add hooks to view
+		if svc.Desired.Hooks != nil {
+			view.Hooks = buildHooksView(svc.Desired.Hooks)
+		}
 	}
 
+	return view
+}
+
+func buildHooksView(hooks *config.Hooks) *HooksView {
+	if hooks == nil {
+		return nil
+	}
+	view := &HooksView{}
+	if hooks.PreHook != nil {
+		view.PreHook = buildHookView(hooks.PreHook)
+	}
+	if hooks.PostHook != nil {
+		view.PostHook = buildHookView(hooks.PostHook)
+	}
+	return view
+}
+
+func buildHookView(hook *config.Hook) *HookView {
+	if hook == nil {
+		return nil
+	}
+	view := &HookView{
+		TaskDefinition: hook.TaskDefinition,
+		Timeout:        hook.Timeout,
+	}
+	// Get command from first container override
+	if len(hook.ContainerOverrides) > 0 && len(hook.ContainerOverrides[0].Command) > 0 {
+		view.Command = hook.ContainerOverrides[0].Command
+	}
 	return view
 }
 
