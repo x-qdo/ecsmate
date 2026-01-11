@@ -357,6 +357,7 @@ Examples:
 ```bash
 ecsmate diff -m ./deploy -f values/staging.cue
 ecsmate apply -m ./deploy --set image.tag=v1.2.3
+ecsmate diff -m examples/cloudinsurance -f examples/cloudinsurance/values/tenants/cal.cue --set _values.images.tag=20260111-r2
 ```
 
 ## SSM parameter references
