@@ -163,5 +163,5 @@ package schema
 #HookContainerOverride: {
 	name:    string
 	command: [...string]
-	environment?: [...#KeyValuePair]
+	environment?: [string]: string
 }

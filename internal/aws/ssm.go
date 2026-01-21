@@ -16,6 +16,10 @@ type SSMClient struct {
 	client *ssm.Client
 }
 
+func (c *SSMClient) Client() *ssm.Client {
+	return c.client
+}
+
 func NewSSMClient(ctx context.Context, region string) (*SSMClient, error) {
 	var opts []func(*config.LoadOptions) error
 	if region != "" {

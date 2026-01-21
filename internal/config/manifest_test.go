@@ -214,17 +214,13 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 					command: ["serve", "--port", "8080"]
 					entryPoint: ["/bin/sh", "-c"]
 					workingDirectory: "/app"
-					environment: [{
-						name: "ENV"
-						value: "production"
-					}, {
-						name: "DEBUG"
-						value: "false"
-					}]
-					secrets: [{
-						name: "DB_PASSWORD"
-						valueFrom: "arn:aws:ssm:us-east-1:123456789:parameter/db-password"
-					}]
+					environment: {
+						ENV: "production"
+						DEBUG: "false"
+					}
+					secrets: {
+						DB_PASSWORD: "arn:aws:ssm:us-east-1:123456789:parameter/db-password"
+					}
 					portMappings: [{
 						containerPort: 8080
 						hostPort: 8080
@@ -277,8 +273,12 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 	if len(cd.Environment) != 2 {
 		t.Errorf("expected 2 environment vars, got %d", len(cd.Environment))
 	}
-	if cd.Environment[0].Name != "ENV" || cd.Environment[0].Value != "production" {
-		t.Errorf("unexpected environment[0]: %+v", cd.Environment[0])
+	envMap := make(map[string]string)
+	for _, kv := range cd.Environment {
+		envMap[kv.Name] = kv.Value
+	}
+	if envMap["ENV"] != "production" {
+		t.Errorf("expected ENV=production, got %s", envMap["ENV"])
 	}
 
 	if len(cd.Secrets) != 1 {

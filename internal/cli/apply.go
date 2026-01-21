@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/qdo/ecsmate/internal/aws"
+	"github.com/qdo/ecsmate/internal/config"
 	"github.com/qdo/ecsmate/internal/diff"
 	"github.com/qdo/ecsmate/internal/engine"
 	"github.com/qdo/ecsmate/internal/log"
@@ -55,7 +56,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
-	// Initialize SSM client for parameter resolution
 	var ssmClient *aws.SSMClient
 	if !opts.NoSSM {
 		var err error
@@ -69,6 +69,16 @@ func runApply(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		log.Error("failed to load manifest", "error", err)
 		os.Exit(ExitCodeError)
+	}
+
+	var managedSecrets *config.ManagedSecrets
+	if manifest.Secrets != nil && manifest.Secrets.Managed != nil {
+		managedSecrets, err = config.LoadManagedSecrets(ctx, opts.ManifestPath, manifest.Secrets.Managed, opts.Region)
+		if err != nil {
+			log.Error("failed to load managed secrets", "error", err)
+			os.Exit(ExitCodeError)
+		}
+		manifest.ResolveManagedSecrets(managedSecrets)
 	}
 
 	clients, err := initAWSClients(ctx, &opts, manifest)
@@ -103,13 +113,42 @@ func runApply(cmd *cobra.Command, args []string) error {
 	planner := engine.NewPlanner()
 	plan := planner.GeneratePlan(state)
 
-	if !plan.HasChanges() {
+	var ssmParamsManager *resources.SSMParamsManager
+	var ssmChanges []resources.SSMParamChange
+	if managedSecrets != nil && ssmClient != nil {
+		ssmParamsManager = resources.NewSSMParamsManager(ssmClient.Client(), managedSecrets)
+		if ssmParamsManager != nil {
+			var err error
+			ssmChanges, err = ssmParamsManager.Diff(ctx)
+			if err != nil {
+				log.Error("failed to diff SSM parameters", "error", err)
+				os.Exit(ExitCodeError)
+			}
+		}
+	}
+
+	hasSSMChanges := len(ssmChanges) > 0
+	if !plan.HasChanges() && !hasSSMChanges {
 		fmt.Println("No changes to apply.")
 		return nil
 	}
 
 	renderer := diff.NewRenderer(os.Stdout, opts.NoColor)
 	renderer.RenderHeader(manifest.Name)
+
+	if hasSSMChanges {
+		var diffChanges []diff.SSMParamChange
+		for _, c := range ssmChanges {
+			diffChanges = append(diffChanges, diff.SSMParamChange{
+				Name:    c.Name,
+				Action:  c.Action,
+				OldHash: c.OldHash,
+				NewHash: c.NewHash,
+			})
+		}
+		renderer.RenderSSMParamChanges(diffChanges)
+	}
+
 	renderer.RenderDiff(plan.Entries)
 	renderer.RenderSummary(plan.Summary, manifest.Name)
 
@@ -145,6 +184,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		TaskDefManager:         builder.TaskDefManager(),
 		ServiceManager:         builder.ServiceManager(),
 		ScheduledManager:       builder.ScheduledTaskManager(),
+		SSMParamsManager:       ssmParamsManager,
 		Output:                 os.Stdout,
 		NoColor:                opts.NoColor,
 		NoWait:                 applyNoWait,

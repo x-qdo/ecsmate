@@ -48,6 +48,7 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(templateCmd)
+	rootCmd.AddCommand(secretsCmd)
 }
 
 func Execute() error {

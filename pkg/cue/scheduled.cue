@@ -20,7 +20,7 @@ package schema
 		containerOverrides?: [...{
 			name:       string
 			command?: [...string]
-			environment?: [...#KeyValuePair]
+			environment?: [string]: string
 			cpu?:       int
 			memory?:    int
 		}]

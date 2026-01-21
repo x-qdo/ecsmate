@@ -118,6 +118,7 @@ func (r *Renderer) RenderDiff(entries []DiffEntry) {
 // Phase 4: Deployments (Service, ScheduledTask)
 func sortByExecutionPhase(entries []DiffEntry) {
 	phaseOrder := map[string]int{
+		"SSMParameter":   0,
 		"TargetGroup":    1,
 		"TaskDefinition": 2,
 		"ListenerRule":   3,
@@ -908,6 +909,33 @@ type DiffSummary struct {
 	Deletes   int
 	Recreates int
 	Noops     int
+}
+
+type SSMParamChange struct {
+	Name    string
+	Action  string
+	OldHash string
+	NewHash string
+}
+
+func (r *Renderer) RenderSSMParamChanges(changes []SSMParamChange) {
+	if len(changes) == 0 {
+		return
+	}
+
+	fmt.Fprintln(r.out)
+	r.hdrColor.Fprintln(r.out, "SSM Parameters:")
+
+	for _, c := range changes {
+		switch c.Action {
+		case "create":
+			r.addColor.Fprintf(r.out, "  + %s (hash: %s)\n", c.Name, c.NewHash)
+		case "update":
+			r.actionColor.Fprintf(r.out, "  ~ %s (hash: %s → %s)\n", c.Name, c.OldHash, c.NewHash)
+		case "delete":
+			r.delColor.Fprintf(r.out, "  - %s (orphaned)\n", c.Name)
+		}
+	}
 }
 
 func (r *Renderer) RenderSummary(summary DiffSummary, manifestName string) {

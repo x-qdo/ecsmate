@@ -44,7 +44,6 @@ func runDiff(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
-	// Initialize SSM client for parameter resolution
 	var ssmClient *aws.SSMClient
 	if !opts.NoSSM {
 		var err error
@@ -58,6 +57,16 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		log.Error("failed to load manifest", "error", err)
 		os.Exit(ExitCodeError)
+	}
+
+	var managedSecrets *config.ManagedSecrets
+	if manifest.Secrets != nil && manifest.Secrets.Managed != nil {
+		managedSecrets, err = config.LoadManagedSecrets(ctx, opts.ManifestPath, manifest.Secrets.Managed, opts.Region)
+		if err != nil {
+			log.Error("failed to load managed secrets", "error", err)
+			os.Exit(ExitCodeError)
+		}
+		manifest.ResolveManagedSecrets(managedSecrets)
 	}
 
 	clients, err := initAWSClients(ctx, &opts, manifest)
@@ -94,6 +103,30 @@ func runDiff(cmd *cobra.Command, args []string) error {
 
 	renderer := diff.NewRenderer(os.Stdout, opts.NoColor)
 	renderer.RenderHeader(manifest.Name)
+
+	if managedSecrets != nil && ssmClient != nil {
+		ssmParamsManager := resources.NewSSMParamsManager(ssmClient.Client(), managedSecrets)
+		if ssmParamsManager != nil {
+			ssmChanges, err := ssmParamsManager.Diff(ctx)
+			if err != nil {
+				log.Error("failed to diff SSM parameters", "error", err)
+				os.Exit(ExitCodeError)
+			}
+			if len(ssmChanges) > 0 {
+				var diffChanges []diff.SSMParamChange
+				for _, c := range ssmChanges {
+					diffChanges = append(diffChanges, diff.SSMParamChange{
+						Name:    c.Name,
+						Action:  c.Action,
+						OldHash: c.OldHash,
+						NewHash: c.NewHash,
+					})
+				}
+				renderer.RenderSSMParamChanges(diffChanges)
+			}
+		}
+	}
+
 	renderer.RenderDiff(plan.Entries)
 	renderer.RenderSummary(plan.Summary, manifest.Name)
 

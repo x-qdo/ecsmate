@@ -3,10 +3,20 @@ package schema
 #Manifest: {
 	name: string
 
+	secrets?:         #SecretsConfig
 	taskDefinitions?: [string]: #TaskDefinition
 	services?:        [string]: #Service
 	scheduledTasks?:  [string]: #ScheduledTask
 	ingress?:         #Ingress
+}
+
+#SecretsConfig: {
+	managed?: {
+		file:      string
+		kmsKeyArn: string
+		ssmPrefix: string
+	}
+	external?: [string]: string
 }
 
 #TaskDefinition: #ManagedTaskDef | #MergedTaskDef | #RemoteTaskDef
@@ -53,8 +63,8 @@ package schema
 	memory?:   int
 	essential?: bool
 	portMappings?: [...#PortMapping]
-	environment?: [...#KeyValuePair]
-	secrets?: [...#Secret]
+	environment?: [string]: string
+	secrets?: [string]: string
 	mountPoints?: [...#MountPoint]
 	command?: [...string]
 	entryPoint?: [...string]
@@ -67,12 +77,12 @@ package schema
 }
 
 #ContainerOverride: {
-	name:   string
-	image?: string
-	cpu?:   int
+	name:    string
+	image?:  string
+	cpu?:    int
 	memory?: int
-	environment?: [...#KeyValuePair]
-	secrets?: [...#Secret]
+	environment?: [string]: string
+	secrets?: [string]: string
 	command?: [...string]
 }
 
@@ -82,16 +92,6 @@ package schema
 	protocol?:     "tcp" | "udp"
 	name?:         string
 	appProtocol?:  "http" | "http2" | "grpc"
-}
-
-#KeyValuePair: {
-	name:  string
-	value: string
-}
-
-#Secret: {
-	name:      string
-	valueFrom: string
 }
 
 #MountPoint: {
@@ -128,10 +128,9 @@ package schema
 #LogConfiguration: {
 	logDriver: "awslogs" | "fluentd" | "gelf" | "journald" | "json-file" | "splunk" | "syslog" | "awsfirelens"
 	options?: [string]: string
-	secretOptions?: [...#Secret]
+	secretOptions?: [string]: string
 
 	// Log group management (only for awslogs driver)
-	// When enabled, ecsmate will create/manage the log group specified in options["awslogs-group"]
 	createLogGroup?:  bool
 	retentionInDays?: 1 | 3 | 5 | 7 | 14 | 30 | 60 | 90 | 120 | 150 | 180 | 365 | 400 | 545 | 731 | 1096 | 1827 | 2192 | 2557 | 2922 | 3288 | 3653
 	kmsKeyId?:        string

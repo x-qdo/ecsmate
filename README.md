@@ -21,6 +21,7 @@ diffs it against live AWS resources, and applies changes with live tracking.
   - [Ingress (ALB listener rules)](#ingress-alb-listener-rules)
 - [Values and overrides](#values-and-overrides)
 - [SSM parameter references](#ssm-parameter-references)
+- [Secrets management](#secrets-management)
 - [Examples](#examples)
 - [Notes and limitations](#notes-and-limitations)
 
@@ -30,12 +31,13 @@ diffs it against live AWS resources, and applies changes with live tracking.
 - Apply pipeline with live tracker (interactive TTY or log-friendly output).
 - ECS services, task definitions, scheduled tasks, and ALB ingress support.
 - Optional SSM parameter resolution with `{{ssm:/path}}` placeholders.
+- Managed secrets with KMS envelope encryption and automatic SSM parameter sync.
 - Built-in status, rollback, validate, and template commands.
 
 ## Requirements
 - Go 1.25+ to build.
 - AWS credentials with access to ECS, EventBridge Scheduler, ELBv2,
-  Application Auto Scaling, IAM, CloudWatch Logs, and SSM (as needed).
+  Application Auto Scaling, IAM, CloudWatch Logs, SSM, KMS, and STS (as needed).
 
 ## Build and run
 ```bash
@@ -104,14 +106,24 @@ Render the fully resolved manifest (YAML or JSON) without diffing/applying.
 Flags:
 - `-o, --output`: `yaml` (default) or `json`
 
+`secrets`  
+Manage encrypted secrets files using KMS envelope encryption.
+Subcommands:
+- `encrypt <file> --kms-arn <arn>`: encrypt a plaintext YAML file
+- `decrypt <file>`: decrypt to stdout
+- `set <file> <key> [--value <val>]`: set or update a secret (prompts if no value)
+- `delete <file> <key>`: remove a secret from the file
+
 ## How it works
 1. Loads all `.cue` files in the manifest directory plus `taskdefs/` and
    `values/` subdirectories.
 2. Merges any `--values` files and applies `--set` overrides.
 3. Resolves `{{ssm:...}}` placeholders (unless `--no-ssm`).
-4. Builds desired state and discovers current ECS/ALB/Scheduler resources.
-5. Generates a plan and renders a diff.
-6. Applies in order:
+4. Loads and decrypts managed secrets (if configured).
+5. Builds desired state and discovers current ECS/ALB/Scheduler resources.
+6. Generates a plan and renders a diff.
+7. Applies in order:
+   - SSM parameters (managed secrets)
    - Log groups (from `awslogs` container configs with `createLogGroup: true`)
    - Target groups (ingress)
    - Task definitions
@@ -398,6 +410,88 @@ Example:
 cluster: "{{ssm:/myapp/prod/ecs/cluster_name}}"
 ```
 
+## Secrets management
+ecsmate provides built-in secrets management using KMS envelope encryption.
+Secrets are encrypted locally and stored in version control, then synced to
+SSM Parameter Store as SecureString parameters during apply.
+
+### Encrypted secrets file
+Create and manage encrypted secrets files:
+```bash
+# Create initial secrets file from plaintext YAML
+echo "db_password: secret123" > secrets.yaml
+ecsmate secrets encrypt secrets.yaml --kms-arn arn:aws:kms:us-east-1:123456789012:key/xxx
+rm secrets.yaml  # remove plaintext
+
+# View decrypted contents
+ecsmate secrets decrypt secrets.enc.yaml
+
+# Add or update a secret
+ecsmate secrets set secrets.enc.yaml api_key --value "newkey123"
+ecsmate secrets set secrets.enc.yaml api_key  # prompts for value
+
+# Remove a secret
+ecsmate secrets delete secrets.enc.yaml old_key
+```
+
+### Manifest configuration
+Configure managed secrets in your manifest:
+```cue
+manifest: schema.#Manifest & {
+  name: "myapp"
+  secrets: {
+    managed: {
+      file: "secrets.enc.yaml"
+      kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/xxx"
+      ssmPrefix: "/myapp/prod"
+    }
+  }
+  // ...
+}
+```
+
+### Using secrets in containers
+Reference managed secrets by key name in container definitions:
+```cue
+containerDefinitions: [{
+  name: "api"
+  image: "myapp:latest"
+  environment: {
+    APP_ENV: "production"
+    LOG_LEVEL: "info"
+  }
+  secrets: {
+    DB_PASSWORD: "db_password"      // key from managed secrets
+    API_KEY: "api_key"              // resolved to SSM ARN automatically
+  }
+}]
+```
+
+During apply, ecsmate:
+1. Creates/updates SSM SecureString parameters at `{ssmPrefix}/{key}`
+2. Resolves secret key names to their SSM parameter ARNs
+3. Task definitions reference the SSM ARNs (values never in task definition)
+
+### External secrets
+For secrets managed outside ecsmate (Secrets Manager, existing SSM params):
+```cue
+secrets: {
+  external: {
+    LEGACY_KEY: "arn:aws:secretsmanager:us-east-1:123456789012:secret:legacy"
+  }
+}
+// Then reference in containers:
+secrets: {
+  LEGACY_KEY: "arn:aws:secretsmanager:..."  // use ARN directly
+}
+```
+
+### Safety features
+- SSM parameters are tagged with `ManagedBy=ecsmate`
+- ecsmate refuses to overwrite parameters not managed by it
+- Diff output shows hash changes, never actual secret values
+- Orphan detection: removes SSM params under prefix that are no longer in secrets file
+
 ## Examples
 Two sample manifests live under `examples/`:
 - `examples/webapp`: web + worker services with scheduled cron task.
@@ -416,5 +510,7 @@ ecsmate template -m examples/cloudinsurance -o yaml
 - `blue-green` and `canary` strategies require CodeDeploy and are not supported
   by the executor.
 - Log groups are only created when using `awslogs` with `createLogGroup: true`.
+- Managed secrets require KMS encrypt/decrypt permissions and SSM write access.
+- Environment and secrets use map syntax (`KEY: "value"`) not array syntax.
 
 [CUE]: https://github.com/cue-lang/cue

@@ -26,6 +26,7 @@ type Executor struct {
 	targetGroupManager  *resources.TargetGroupManager
 	listenerRuleManager *resources.ListenerRuleManager
 	sdManager           *resources.ServiceDiscoveryManager
+	ssmParamsManager    *resources.SSMParamsManager
 	hookExecutor        *resources.HookExecutor
 	tracker             *Tracker
 	noWait              bool
@@ -43,12 +44,13 @@ type ExecutorConfig struct {
 	TaskDefManager         *resources.TaskDefManager
 	ServiceManager         *resources.ServiceManager
 	ScheduledManager       *resources.ScheduledTaskManager
+	SSMParamsManager       *resources.SSMParamsManager
 	Output                 io.Writer
 	NoColor                bool
 	NoWait                 bool
 	Timeout                time.Duration
 	MaxParallel            int
-	LogLines               int // -1=all, 0=none, N=limit
+	LogLines               int
 }
 
 func NewExecutor(cfg ExecutorConfig) *Executor {
@@ -70,6 +72,7 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 		taskDefManager:   cfg.TaskDefManager,
 		serviceManager:   cfg.ServiceManager,
 		scheduledManager: cfg.ScheduledManager,
+		ssmParamsManager: cfg.SSMParamsManager,
 		tracker:          NewTracker(cfg.Output, cfg.NoColor),
 		noWait:           cfg.NoWait,
 		timeout:          timeout,
@@ -97,7 +100,10 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster string) error {
 	e.tracker.PrintHeader(cluster)
 
-	// Apply log groups first (before task defs)
+	if err := e.applySSMParams(ctx); err != nil {
+		return fmt.Errorf("failed to apply SSM parameters: %w", err)
+	}
+
 	if err := e.applyLogGroups(ctx, plan); err != nil {
 		return fmt.Errorf("failed to apply log groups: %w", err)
 	}
@@ -140,6 +146,41 @@ func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster str
 
 	if e.tracker.HasFailures() {
 		return fmt.Errorf("deployment completed with failures")
+	}
+
+	return nil
+}
+
+func (e *Executor) applySSMParams(ctx context.Context) error {
+	if e.ssmParamsManager == nil {
+		return nil
+	}
+
+	e.tracker.PrintSection("SSM Parameters")
+
+	changes, err := e.ssmParamsManager.Diff(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(changes) == 0 {
+		return nil
+	}
+
+	for _, c := range changes {
+		e.tracker.AddTask(c.Name, "ssm-parameter")
+		e.tracker.StartTask(c.Name)
+	}
+
+	if err := e.ssmParamsManager.Apply(ctx); err != nil {
+		for _, c := range changes {
+			e.tracker.FailTask(c.Name, err.Error())
+		}
+		return err
+	}
+
+	for _, c := range changes {
+		e.tracker.CompleteTask(c.Name, c.Action)
 	}
 
 	return nil
