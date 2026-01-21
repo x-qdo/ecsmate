@@ -6,6 +6,7 @@ diffs it against live AWS resources, and applies changes with live tracking.
 ## Table of contents
 - [Highlights](#highlights)
 - [Requirements](#requirements)
+- [IAM Permissions](#iam-permissions)
 - [Build and run](#build-and-run)
 - [CLI basics](#cli-basics)
   - [Global flags](#global-flags)
