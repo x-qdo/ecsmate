@@ -1085,3 +1085,274 @@ func TestPlanner_GeneratePlan_ServiceDiscovery(t *testing.T) {
 		t.Fatal("expected service discovery entry")
 	}
 }
+
+func TestBuildTaskDefView_WithSecrets(t *testing.T) {
+	td := &resources.TaskDefResource{
+		Name: "api",
+		Type: "managed",
+		Desired: &config.TaskDefinition{
+			Name:   "api",
+			Type:   "managed",
+			Family: "myapp-api",
+			CPU:    "256",
+			Memory: "512",
+			ContainerDefinitions: []config.ContainerDefinition{
+				{
+					Name:      "api",
+					Image:     "123456789.dkr.ecr.us-east-1.amazonaws.com/api:latest",
+					Essential: true,
+					Secrets: []config.Secret{
+						{Name: "DB_PASSWORD", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/myapp/db_password"},
+						{Name: "API_KEY", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/myapp/api_key"},
+					},
+				},
+			},
+		},
+	}
+
+	view := buildTaskDefView(td)
+
+	if len(view.ContainerDefinitions) != 1 {
+		t.Fatalf("expected 1 container definition, got %d", len(view.ContainerDefinitions))
+	}
+
+	cd := view.ContainerDefinitions[0]
+	if len(cd.Secrets) != 2 {
+		t.Fatalf("expected 2 secrets, got %d", len(cd.Secrets))
+	}
+
+	if cd.Secrets["DB_PASSWORD"] != "arn:aws:ssm:us-east-1:123:parameter/myapp/db_password" {
+		t.Errorf("unexpected DB_PASSWORD value: %s", cd.Secrets["DB_PASSWORD"])
+	}
+
+	if cd.Secrets["API_KEY"] != "arn:aws:ssm:us-east-1:123:parameter/myapp/api_key" {
+		t.Errorf("unexpected API_KEY value: %s", cd.Secrets["API_KEY"])
+	}
+}
+
+func TestBuildTaskDefCurrentView_WithSecrets(t *testing.T) {
+	td := &resources.TaskDefResource{
+		Name: "api",
+		Type: "managed",
+		Current: &types.TaskDefinition{
+			Family: aws.String("myapp-api"),
+			ContainerDefinitions: []types.ContainerDefinition{
+				{
+					Name:  aws.String("api"),
+					Image: aws.String("123456789.dkr.ecr.us-east-1.amazonaws.com/api:v1"),
+					Secrets: []types.Secret{
+						{Name: aws.String("DB_PASSWORD"), ValueFrom: aws.String("arn:aws:ssm:us-east-1:123:parameter/myapp/db_password")},
+					},
+				},
+			},
+		},
+	}
+
+	view := buildTaskDefCurrentView(td)
+
+	if len(view.ContainerDefinitions) != 1 {
+		t.Fatalf("expected 1 container definition, got %d", len(view.ContainerDefinitions))
+	}
+
+	cd := view.ContainerDefinitions[0]
+	if len(cd.Secrets) != 1 {
+		t.Fatalf("expected 1 secret, got %d", len(cd.Secrets))
+	}
+
+	if cd.Secrets["DB_PASSWORD"] != "arn:aws:ssm:us-east-1:123:parameter/myapp/db_password" {
+		t.Errorf("unexpected DB_PASSWORD value: %s", cd.Secrets["DB_PASSWORD"])
+	}
+}
+
+func TestPlanner_GeneratePlan_TaskDefSecretsChange(t *testing.T) {
+	state := &resources.DesiredState{
+		TaskDefs: map[string]*resources.TaskDefResource{
+			"api": {
+				Name:   "api",
+				Type:   "managed",
+				Action: resources.TaskDefActionUpdate,
+				Desired: &config.TaskDefinition{
+					Name:   "api",
+					Type:   "managed",
+					Family: "myapp-api",
+					ContainerDefinitions: []config.ContainerDefinition{
+						{
+							Name:  "api",
+							Image: "api:v1",
+							Secrets: []config.Secret{
+								{Name: "DB_PASSWORD", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/myapp/db_password"},
+								{Name: "NEW_SECRET", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/myapp/new_secret"},
+							},
+						},
+					},
+				},
+				Current: &types.TaskDefinition{
+					Family: aws.String("myapp-api"),
+					ContainerDefinitions: []types.ContainerDefinition{
+						{
+							Name:  aws.String("api"),
+							Image: aws.String("api:v1"),
+							Secrets: []types.Secret{
+								{Name: aws.String("DB_PASSWORD"), ValueFrom: aws.String("arn:aws:ssm:us-east-1:123:parameter/myapp/db_password")},
+							},
+						},
+					},
+				},
+			},
+		},
+		Services:       make(map[string]*resources.ServiceResource),
+		ScheduledTasks: make(map[string]*resources.ScheduledTaskResource),
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	var tdEntry *diff.DiffEntry
+	for i := range plan.Entries {
+		if plan.Entries[i].Resource == "TaskDefinition" && plan.Entries[i].Name == "api" {
+			tdEntry = &plan.Entries[i]
+			break
+		}
+	}
+
+	if tdEntry == nil {
+		t.Fatal("TaskDefinition entry not found")
+	}
+
+	if tdEntry.Type != diff.DiffTypeUpdate {
+		t.Errorf("expected UPDATE for secrets change, got %s", tdEntry.Type)
+	}
+
+	if tdEntry.Desired == nil {
+		t.Fatal("expected Desired to be set")
+	}
+
+	desiredView, ok := tdEntry.Desired.(TaskDefView)
+	if !ok {
+		t.Fatal("expected Desired to be TaskDefView")
+	}
+
+	if len(desiredView.ContainerDefinitions) != 1 {
+		t.Fatalf("expected 1 container def, got %d", len(desiredView.ContainerDefinitions))
+	}
+
+	if len(desiredView.ContainerDefinitions[0].Secrets) != 2 {
+		t.Errorf("expected 2 secrets in desired, got %d", len(desiredView.ContainerDefinitions[0].Secrets))
+	}
+}
+
+func TestPlanner_GeneratePlan_ServiceUpdatedWhenTaskDefSecretsChange(t *testing.T) {
+	state := &resources.DesiredState{
+		Manifest: &config.Manifest{Name: "app"},
+		TaskDefs: map[string]*resources.TaskDefResource{
+			"api": {
+				Name:   "api",
+				Action: resources.TaskDefActionUpdate,
+				Desired: &config.TaskDefinition{
+					Family: "app-api",
+					ContainerDefinitions: []config.ContainerDefinition{
+						{
+							Name:  "api",
+							Image: "api:v1",
+							Secrets: []config.Secret{
+								{Name: "DB_PASSWORD", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/app/db_password"},
+							},
+						},
+					},
+				},
+			},
+		},
+		Services: map[string]*resources.ServiceResource{
+			"api-svc": {
+				Name:   "api-svc",
+				Action: resources.ServiceActionNoop,
+				Desired: &config.Service{
+					Name:           "api-svc",
+					TaskDefinition: "api",
+				},
+			},
+		},
+		ScheduledTasks: make(map[string]*resources.ScheduledTaskResource),
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	var svcEntry *diff.DiffEntry
+	for i := range plan.Entries {
+		if plan.Entries[i].Resource == "Service" && plan.Entries[i].Name == "api-svc" {
+			svcEntry = &plan.Entries[i]
+			break
+		}
+	}
+
+	if svcEntry == nil {
+		t.Fatal("Service entry not found")
+	}
+
+	if svcEntry.Type != diff.DiffTypeUpdate {
+		t.Errorf("expected Service UPDATE when TaskDef changes (including secrets), got %s", svcEntry.Type)
+	}
+
+	if svcEntry.PropagationReason == "" {
+		t.Error("expected PropagationReason to be set")
+	}
+}
+
+func TestPlanner_GeneratePlan_ScheduledTaskUpdatedWhenTaskDefSecretsChange(t *testing.T) {
+	state := &resources.DesiredState{
+		Manifest: &config.Manifest{Name: "app"},
+		TaskDefs: map[string]*resources.TaskDefResource{
+			"worker": {
+				Name:   "worker",
+				Action: resources.TaskDefActionUpdate,
+				Desired: &config.TaskDefinition{
+					Family: "app-worker",
+					ContainerDefinitions: []config.ContainerDefinition{
+						{
+							Name:  "worker",
+							Image: "worker:v1",
+							Secrets: []config.Secret{
+								{Name: "QUEUE_PASSWORD", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/app/queue_password"},
+							},
+						},
+					},
+				},
+			},
+		},
+		Services: make(map[string]*resources.ServiceResource),
+		ScheduledTasks: map[string]*resources.ScheduledTaskResource{
+			"cron-job": {
+				Name:   "cron-job",
+				Action: resources.ScheduledTaskActionNoop,
+				Desired: &config.ScheduledTask{
+					Name:           "cron-job",
+					TaskDefinition: "worker",
+				},
+			},
+		},
+	}
+
+	planner := NewPlanner()
+	plan := planner.GeneratePlan(state)
+
+	var taskEntry *diff.DiffEntry
+	for i := range plan.Entries {
+		if plan.Entries[i].Resource == "ScheduledTask" && plan.Entries[i].Name == "cron-job" {
+			taskEntry = &plan.Entries[i]
+			break
+		}
+	}
+
+	if taskEntry == nil {
+		t.Fatal("ScheduledTask entry not found")
+	}
+
+	if taskEntry.Type != diff.DiffTypeUpdate {
+		t.Errorf("expected ScheduledTask UPDATE when TaskDef changes, got %s", taskEntry.Type)
+	}
+
+	if taskEntry.PropagationReason == "" {
+		t.Error("expected PropagationReason to be set")
+	}
+}

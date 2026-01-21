@@ -594,3 +594,177 @@ func TestRenderer_ECSAssignedDefaultsShownWhenInDesired(t *testing.T) {
 		t.Errorf("expected new hostPort value 8080, got: %s", output)
 	}
 }
+
+func TestRenderer_RenderSSMParamChanges_Create(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+
+	changes := []SSMParamChange{
+		{
+			Name:    "/myapp/db_password",
+			Action:  "create",
+			NewHash: "abc12345",
+		},
+	}
+
+	renderer.RenderSSMParamChanges(changes)
+
+	output := buf.String()
+
+	if !strings.Contains(output, "SSM Parameters") {
+		t.Errorf("expected 'SSM Parameters' header, got: %s", output)
+	}
+
+	if !strings.Contains(output, "/myapp/db_password") {
+		t.Errorf("expected parameter name in output, got: %s", output)
+	}
+
+	if !strings.Contains(output, "abc12345") {
+		t.Errorf("expected hash in output, got: %s", output)
+	}
+
+	if !strings.Contains(output, "+") {
+		t.Errorf("expected '+' for create action, got: %s", output)
+	}
+}
+
+func TestRenderer_RenderSSMParamChanges_Update(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+
+	changes := []SSMParamChange{
+		{
+			Name:    "/myapp/api_key",
+			Action:  "update",
+			OldHash: "old12345",
+			NewHash: "new67890",
+		},
+	}
+
+	renderer.RenderSSMParamChanges(changes)
+
+	output := buf.String()
+
+	if !strings.Contains(output, "/myapp/api_key") {
+		t.Errorf("expected parameter name in output, got: %s", output)
+	}
+
+	if !strings.Contains(output, "old12345") {
+		t.Errorf("expected old hash in output, got: %s", output)
+	}
+
+	if !strings.Contains(output, "new67890") {
+		t.Errorf("expected new hash in output, got: %s", output)
+	}
+
+	if !strings.Contains(output, "~") {
+		t.Errorf("expected '~' for update action, got: %s", output)
+	}
+
+	if !strings.Contains(output, "→") {
+		t.Errorf("expected '→' arrow between hashes, got: %s", output)
+	}
+}
+
+func TestRenderer_RenderSSMParamChanges_Delete(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+
+	changes := []SSMParamChange{
+		{
+			Name:   "/myapp/old_secret",
+			Action: "delete",
+		},
+	}
+
+	renderer.RenderSSMParamChanges(changes)
+
+	output := buf.String()
+
+	if !strings.Contains(output, "/myapp/old_secret") {
+		t.Errorf("expected parameter name in output, got: %s", output)
+	}
+
+	if !strings.Contains(output, "orphaned") {
+		t.Errorf("expected 'orphaned' indicator, got: %s", output)
+	}
+
+	if !strings.Contains(output, "-") {
+		t.Errorf("expected '-' for delete action, got: %s", output)
+	}
+}
+
+func TestRenderer_RenderSSMParamChanges_Empty(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+
+	renderer.RenderSSMParamChanges([]SSMParamChange{})
+
+	output := buf.String()
+
+	if output != "" {
+		t.Errorf("expected empty output for no changes, got: %s", output)
+	}
+}
+
+func TestRenderer_RenderSSMParamChanges_Multiple(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+
+	changes := []SSMParamChange{
+		{Name: "/app/new", Action: "create", NewHash: "hash1"},
+		{Name: "/app/update", Action: "update", OldHash: "old", NewHash: "new"},
+		{Name: "/app/delete", Action: "delete"},
+	}
+
+	renderer.RenderSSMParamChanges(changes)
+
+	output := buf.String()
+
+	if !strings.Contains(output, "/app/new") {
+		t.Error("expected /app/new in output")
+	}
+	if !strings.Contains(output, "/app/update") {
+		t.Error("expected /app/update in output")
+	}
+	if !strings.Contains(output, "/app/delete") {
+		t.Error("expected /app/delete in output")
+	}
+}
+
+func TestRenderer_RenderDiff_SSMParameterSorting(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+
+	entries := []DiffEntry{
+		{Type: DiffTypeCreate, Name: "api-service", Resource: "Service", Desired: map[string]interface{}{"name": "api"}},
+		{Type: DiffTypeCreate, Name: "db-password", Resource: "SSMParameter", Desired: map[string]interface{}{"name": "db-password"}},
+		{Type: DiffTypeCreate, Name: "web-taskdef", Resource: "TaskDefinition", Desired: map[string]interface{}{"name": "web"}},
+	}
+
+	renderer.RenderDiff(entries)
+
+	output := buf.String()
+
+	// SSMParameter should come before TaskDefinition and Service in phase order
+	ssmIdx := strings.Index(output, "SSMParameter")
+	tdIdx := strings.Index(output, "TaskDefinition")
+	svcIdx := strings.Index(output, "Service")
+
+	if ssmIdx == -1 {
+		t.Error("SSMParameter not found in output")
+	}
+	if tdIdx == -1 {
+		t.Error("TaskDefinition not found in output")
+	}
+	if svcIdx == -1 {
+		t.Error("Service not found in output")
+	}
+
+	if ssmIdx > tdIdx {
+		t.Error("SSMParameter should appear before TaskDefinition")
+	}
+	if tdIdx > svcIdx {
+		t.Error("TaskDefinition should appear before Service")
+	}
+}
