@@ -227,6 +227,9 @@ func (r *ServiceResource) ToUpdateInput() (*ecs.UpdateServiceInput, error) {
 	if r.Current != nil && r.Current.EnableExecuteCommand != svc.EnableExecuteCommand {
 		input.ForceNewDeployment = true
 	}
+	if r.Current != nil && r.capacityProviderStrategyChanged() {
+		input.ForceNewDeployment = true
+	}
 	if svc.HealthCheckGracePeriodSecondsSet {
 		input.HealthCheckGracePeriodSeconds = aws.Int32(int32(svc.HealthCheckGracePeriodSeconds))
 	}
@@ -326,8 +329,16 @@ func (m *ServiceManager) discoverService(ctx context.Context, resource *ServiceR
 	}
 
 	for _, svc := range services {
-		if aws.ToString(svc.Status) != "INACTIVE" {
+		status := aws.ToString(svc.Status)
+		switch status {
+		case "ACTIVE":
 			resource.Current = &svc
+			return nil
+		case "DRAINING":
+			log.Info("service is draining, waiting for inactive", "name", serviceName)
+			if err := m.ecsClient.WaitForServiceInactive(ctx, serviceName); err != nil {
+				return fmt.Errorf("waiting for draining service %s: %w", serviceName, err)
+			}
 			return nil
 		}
 	}
@@ -497,6 +508,45 @@ func (resource *ServiceResource) deploymentControllerChanged() bool {
 	return currentType != desiredType
 }
 
+// capacityProviderStrategyChanged detects changes to capacity provider strategy,
+// including switching from launch type to capacity provider (requires ForceNewDeployment).
+func (resource *ServiceResource) capacityProviderStrategyChanged() bool {
+	current := resource.Current
+	desired := resource.Desired
+
+	currentHasCP := len(current.CapacityProviderStrategy) > 0
+	desiredHasCP := len(desired.CapacityProviderStrategy) > 0
+
+	if currentHasCP != desiredHasCP {
+		return true
+	}
+
+	if !currentHasCP && !desiredHasCP {
+		return false
+	}
+
+	if len(current.CapacityProviderStrategy) != len(desired.CapacityProviderStrategy) {
+		return true
+	}
+
+	currentCPs := make(map[string]types.CapacityProviderStrategyItem)
+	for _, cp := range current.CapacityProviderStrategy {
+		currentCPs[aws.ToString(cp.CapacityProvider)] = cp
+	}
+
+	for _, desiredCP := range desired.CapacityProviderStrategy {
+		currentCP, exists := currentCPs[desiredCP.CapacityProvider]
+		if !exists {
+			return true
+		}
+		if int(currentCP.Weight) != desiredCP.Weight || int(currentCP.Base) != desiredCP.Base {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (resource *ServiceResource) determineAutoScalingAction() {
 	desired := resource.Desired
 	if desired == nil {
@@ -644,6 +694,10 @@ func (resource *ServiceResource) hasChanges() bool {
 	}
 
 	if resource.loadBalancersChanged() {
+		return true
+	}
+
+	if resource.capacityProviderStrategyChanged() {
 		return true
 	}
 

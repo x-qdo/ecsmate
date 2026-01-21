@@ -11,6 +11,7 @@ import (
 
 type Manifest struct {
 	Name            string
+	Tags            map[string]string
 	Secrets         *SecretsConfig
 	TaskDefinitions map[string]TaskDefinition
 	Services        map[string]Service
@@ -416,6 +417,7 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 	log.Debug("parsing manifest from CUE value")
 
 	manifest := &Manifest{
+		Tags:            make(map[string]string),
 		TaskDefinitions: make(map[string]TaskDefinition),
 		Services:        make(map[string]Service),
 		ScheduledTasks:  make(map[string]ScheduledTask),
@@ -423,6 +425,20 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 
 	if name, err := ExtractString(value, "name"); err == nil {
 		manifest.Name = name
+	}
+
+	tags := value.LookupPath(cue.ParsePath("tags"))
+	if tags.Exists() {
+		iter, err := tags.Fields()
+		if err == nil {
+			for iter.Next() {
+				if val, err := iter.Value().String(); err == nil {
+					key := iter.Selector().String()
+					key = strings.Trim(key, "\"")
+					manifest.Tags[key] = val
+				}
+			}
+		}
 	}
 
 	secretsVal := value.LookupPath(cue.ParsePath("secrets"))

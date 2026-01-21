@@ -82,7 +82,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 		manifest, err := loadManifest(ctx, &opts, ssmClient)
 		if err != nil {
-			log.Error("failed to load manifest", "error", err)
+			printManifestError(err, !opts.NoColor)
 			os.Exit(ExitCodeError)
 		}
 

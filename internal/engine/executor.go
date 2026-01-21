@@ -393,7 +393,7 @@ func (e *Executor) applyListenerRules(ctx context.Context, plan *ExecutionPlan, 
 
 	e.tracker.PrintSection("\nListener Rules")
 
-	ruleResources, err := e.listenerRuleManager.BuildResources(ctx, ingress.ListenerArn, ingress.Rules, targetGroupArns, plan.Manifest.Name)
+	ruleResources, err := e.listenerRuleManager.BuildResources(ctx, ingress.ListenerArn, ingress.Rules, targetGroupArns, plan.Manifest.Name, plan.Manifest.Tags, nil)
 	if err != nil {
 		return fmt.Errorf("failed to build listener rules: %w", err)
 	}

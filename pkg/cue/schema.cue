@@ -2,6 +2,7 @@ package schema
 
 #Manifest: {
 	name: string
+	tags?: [string]: string
 
 	secrets?:         #SecretsConfig
 	taskDefinitions?: [string]: #TaskDefinition

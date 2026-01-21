@@ -48,23 +48,21 @@ func (m *ListenerRuleManager) DescribeExistingRules(ctx context.Context, listene
 	return m.client.DescribeListenerRules(ctx, listenerArn)
 }
 
-func (m *ListenerRuleManager) BuildResources(ctx context.Context, listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, manifestName string) ([]*ListenerRuleResource, error) {
+func (m *ListenerRuleManager) BuildResources(ctx context.Context, listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, manifestName string, manifestTags map[string]string, tgTags map[string]map[string]string) ([]*ListenerRuleResource, error) {
 	existingRules, err := m.client.DescribeListenerRules(ctx, listenerArn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe listener rules: %w", err)
 	}
 
-	return m.BuildResourcesWithExisting(listenerArn, rules, targetGroupArns, existingRules, manifestName), nil
+	return m.BuildResourcesWithExisting(listenerArn, rules, targetGroupArns, existingRules, manifestName, manifestTags, tgTags), nil
 }
 
-// BuildResourcesWithExisting builds listener rule resources with manifest name for ownership filtering.
-// When manifestName is provided, only rules whose target groups belong to this manifest are marked for deletion.
-func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, existingRules []types.Rule, manifestName string) []*ListenerRuleResource {
+// BuildResourcesWithExisting builds listener rule resources with manifest tags for ownership filtering.
+func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, existingRules []types.Rule, manifestName string, manifestTags map[string]string, tgTags map[string]map[string]string) []*ListenerRuleResource {
 	matches, usedArns := matchExistingListenerRulesWithUsed(rules, existingRules)
 
 	var resources []*ListenerRuleResource
 
-	// Build resources for desired rules
 	for i := range rules {
 		rule := &rules[i]
 		resource := &ListenerRuleResource{
@@ -73,7 +71,6 @@ func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rul
 			ListenerArn: listenerArn,
 		}
 
-		// Resolve target group ARN for service backends
 		if rule.Service != nil {
 			if arn, ok := targetGroupArns[i]; ok {
 				resource.TargetGroupArn = arn
@@ -89,16 +86,13 @@ func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rul
 		resources = append(resources, resource)
 	}
 
-	// Build DELETE resources for orphaned rules (exist in AWS but not in manifest)
-	// Only delete rules whose target groups belong to this manifest
 	for i := range existingRules {
 		existing := &existingRules[i]
 		arn := aws.ToString(existing.RuleArn)
 		if arn == "" || usedArns[arn] {
-			continue // Skip matched rules
+			continue
 		}
 
-		// Skip default rule
 		priority := aws.ToString(existing.Priority)
 		if priority == "default" {
 			continue
@@ -107,8 +101,15 @@ func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rul
 		tgArn := extractTargetGroupArn(existing)
 		tgName := extractTargetGroupName(tgArn)
 
-		// Skip rules whose target groups don't belong to this manifest
 		if manifestName != "" && tgArn != "" && !isListenerRuleOwnedByManifest(tgName, manifestName) {
+			continue
+		}
+
+		if tgTags == nil {
+			continue
+		}
+		tags := tgTags[tgArn]
+		if !matchesManifestTags(tags, manifestTags) {
 			continue
 		}
 
@@ -117,7 +118,7 @@ func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rul
 
 		resource := &ListenerRuleResource{
 			Priority:       priorityInt,
-			Desired:        nil, // No desired state = delete
+			Desired:        nil,
 			Current:        existing,
 			Arn:            arn,
 			ListenerArn:    listenerArn,

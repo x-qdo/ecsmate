@@ -1029,9 +1029,26 @@ type ScheduledTaskView struct {
 	PlatformVersion    string                    `json:"platformVersion,omitempty"`
 	Group              string                    `json:"group,omitempty"`
 	NetworkConfig      *NetworkConfigView        `json:"networkConfiguration,omitempty"`
+	Overrides          *ScheduledTaskOverrides   `json:"overrides,omitempty"`
 	Tags               []ScheduledTaskTagView    `json:"tags,omitempty"`
 	DeadLetterConfig   *DeadLetterConfigView     `json:"deadLetterConfig,omitempty"`
 	RetryPolicy        *ScheduledRetryPolicyView `json:"retryPolicy,omitempty"`
+}
+
+type ScheduledTaskOverrides struct {
+	CPU                string                           `json:"cpu,omitempty"`
+	Memory             string                           `json:"memory,omitempty"`
+	TaskRoleArn        string                           `json:"taskRoleArn,omitempty"`
+	ExecutionRoleArn   string                           `json:"executionRoleArn,omitempty"`
+	ContainerOverrides []ScheduledContainerOverrideView `json:"containerOverrides,omitempty"`
+}
+
+type ScheduledContainerOverrideView struct {
+	Name        string            `json:"name"`
+	Command     []string          `json:"command,omitempty"`
+	CPU         int               `json:"cpu,omitempty"`
+	Memory      int               `json:"memory,omitempty"`
+	Environment map[string]string `json:"environment,omitempty"`
 }
 
 func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTaskView {
@@ -1072,6 +1089,41 @@ func buildScheduledTaskView(task *resources.ScheduledTaskResource) ScheduledTask
 				MaximumRetryAttempts:     task.Desired.RetryPolicy.MaximumRetryAttempts,
 			}
 		}
+
+		if task.Desired.Overrides != nil {
+			view.Overrides = buildScheduledTaskOverridesView(task.Desired.Overrides)
+		}
+	}
+
+	return view
+}
+
+func buildScheduledTaskOverridesView(overrides *config.TaskOverrides) *ScheduledTaskOverrides {
+	if overrides == nil {
+		return nil
+	}
+
+	view := &ScheduledTaskOverrides{
+		CPU:              overrides.CPU,
+		Memory:           overrides.Memory,
+		TaskRoleArn:      overrides.TaskRoleArn,
+		ExecutionRoleArn: overrides.ExecutionRoleArn,
+	}
+
+	for _, co := range overrides.ContainerOverrides {
+		cov := ScheduledContainerOverrideView{
+			Name:    co.Name,
+			Command: co.Command,
+			CPU:     co.CPU,
+			Memory:  co.Memory,
+		}
+		if len(co.Environment) > 0 {
+			cov.Environment = make(map[string]string)
+			for _, env := range co.Environment {
+				cov.Environment[env.Name] = env.Value
+			}
+		}
+		view.ContainerOverrides = append(view.ContainerOverrides, cov)
 	}
 
 	return view

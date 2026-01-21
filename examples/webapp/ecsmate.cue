@@ -1,6 +1,11 @@
 package webapp
 
-import "github.com/x-qdo/ecsmate/pkg/cue:schema"
+import (
+	"list"
+	"strings"
+
+	"github.com/x-qdo/ecsmate/pkg/cue:schema"
+)
 
 manifest: schema.#Manifest & {
 	name: "webapp"
@@ -74,28 +79,40 @@ manifest: schema.#Manifest & {
 		}
 	}
 
+	_cronTasks: [{
+		name:    "dailyReport"
+		command: "report:daily"
+		cron:    "0 2 * * ? *"
+	}, {
+		name:    "weeklyCleanup"
+		command: "cleanup:old-records --days=30"
+		cron:    "0 3 ? * SUN *"
+	}]
+
 	scheduledTasks: {
-		dailyReport: {
-			taskDefinition: "cron"
-			cluster:        _values.cluster
-			schedule: {
-				type:       "cron"
-				expression: "0 2 * * ? *"
-			}
-			taskCount:  1
-			launchType: "FARGATE"
-			networkConfiguration: {
-				awsvpcConfiguration: {
-					subnets:        _values.network.subnets
-					securityGroups: _values.network.securityGroups
-					assignPublicIp: "DISABLED"
+		for _, task in _cronTasks {
+			(task.name): {
+				taskDefinition: "cron"
+				cluster:        _values.cluster
+				schedule: {
+					type:       "cron"
+					expression: task.cron
 				}
-			}
-			overrides: {
-				containerOverrides: [{
-					name:    "cron"
-					command: ["php", "artisan", "report:daily"]
-				}]
+				taskCount:  1
+				launchType: "FARGATE"
+				networkConfiguration: {
+					awsvpcConfiguration: {
+						subnets:        _values.network.subnets
+						securityGroups: _values.network.securityGroups
+						assignPublicIp: "DISABLED"
+					}
+				}
+				overrides: {
+					containerOverrides: [{
+						name:    "cron"
+						command: list.Concat([["php", "artisan"], strings.Split(task.command, " ")])
+					}]
+				}
 			}
 		}
 	}
