@@ -73,7 +73,8 @@ type DiffEntry struct {
 	Desired           interface{}
 	Details           string
 	RecreateReasons   []string
-	PropagationReason string // Why this change was propagated from another resource
+	PropagationReason string   // Why this change was propagated from another resource
+	Hooks             []string // Hook commands that will run during deployment
 }
 
 // RenderHeader displays the planning header with manifest name
@@ -170,6 +171,16 @@ func (r *Renderer) renderEntryBoxed(entry DiffEntry) {
 		r.renderBoxedRecreate(entry)
 	case DiffTypeDelete:
 		r.renderBoxedDelete(entry)
+	}
+
+	// Show hooks that will run during deployment
+	if len(entry.Hooks) > 0 {
+		r.dimColor.Fprint(r.out, boxMid)
+		r.ctxColor.Fprintln(r.out, " hooks:")
+		for _, hook := range entry.Hooks {
+			r.dimColor.Fprint(r.out, boxMid)
+			r.actionColor.Fprintf(r.out, "   → %s\n", hook)
+		}
 	}
 
 	// Bottom line: └ Action Resource/Name

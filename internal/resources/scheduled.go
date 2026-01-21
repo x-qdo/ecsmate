@@ -27,12 +27,13 @@ const (
 type ScheduledTaskResource struct {
 	Name    string
 	Desired *config.ScheduledTask
-	Current *types.ScheduleSummary
+	Current *scheduler.GetScheduleOutput
 	Action  ScheduledTaskAction
 
 	TaskDefinitionArn string
 	RoleArn           string
-	PropagationReason string // Set when action was propagated from dependency
+	Arn               string
+	PropagationReason string
 }
 
 func (r *ScheduledTaskResource) ScheduleExpression() string {
@@ -86,7 +87,7 @@ func (r *ScheduledTaskResource) ToCreateInput(groupName string) (*scheduler.Crea
 	}
 
 	target := &types.Target{
-		Arn:           aws.String(fmt.Sprintf("arn:aws:ecs:%s:cluster/%s", getRegionFromCluster(task.Cluster), task.Cluster)),
+		Arn:           aws.String(getClusterArn(task.Cluster)),
 		RoleArn:       aws.String(r.RoleArn),
 		EcsParameters: ecsParams,
 	}
@@ -125,6 +126,16 @@ func (r *ScheduledTaskResource) ToCreateInput(groupName string) (*scheduler.Crea
 	return input, nil
 }
 
+func BuildSchedulerTags(manifestTags map[string]string) []types.Tag {
+	tags := []types.Tag{
+		{Key: aws.String(TagKeyManagedBy), Value: aws.String(TagValueEcsmate)},
+	}
+	for k, v := range manifestTags {
+		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return tags
+}
+
 func (r *ScheduledTaskResource) ToUpdateInput(groupName string) (*scheduler.UpdateScheduleInput, error) {
 	if r.Desired == nil {
 		return nil, fmt.Errorf("no desired state for scheduled task %s", r.Name)
@@ -161,7 +172,7 @@ func (r *ScheduledTaskResource) ToUpdateInput(groupName string) (*scheduler.Upda
 	}
 
 	target := &types.Target{
-		Arn:           aws.String(fmt.Sprintf("arn:aws:ecs:%s:cluster/%s", getRegionFromCluster(task.Cluster), task.Cluster)),
+		Arn:           aws.String(getClusterArn(task.Cluster)),
 		RoleArn:       aws.String(r.RoleArn),
 		EcsParameters: ecsParams,
 	}
@@ -205,6 +216,10 @@ type ScheduledTaskManager struct {
 	groupName       string
 }
 
+func (m *ScheduledTaskManager) GroupName() string {
+	return m.groupName
+}
+
 func NewScheduledTaskManager(schedulerClient *awsclient.SchedulerClient, groupName string) *ScheduledTaskManager {
 	if groupName == "" {
 		groupName = "default"
@@ -235,18 +250,12 @@ func (m *ScheduledTaskManager) BuildResource(ctx context.Context, name string, t
 func (m *ScheduledTaskManager) discoverScheduledTask(ctx context.Context, resource *ScheduledTaskResource) error {
 	log.Debug("discovering scheduled task", "name", resource.Name, "group", m.groupName)
 
-	schedules, err := m.schedulerClient.ListSchedules(ctx, m.groupName, resource.Name)
+	schedule, err := m.schedulerClient.GetSchedule(ctx, resource.Name, m.groupName)
 	if err != nil {
 		return err
 	}
 
-	for _, schedule := range schedules {
-		if aws.ToString(schedule.Name) == resource.Name {
-			resource.Current = &schedule
-			return nil
-		}
-	}
-
+	resource.Current = schedule
 	return nil
 }
 
@@ -256,7 +265,82 @@ func (resource *ScheduledTaskResource) determineAction() {
 		return
 	}
 
-	resource.Action = ScheduledTaskActionUpdate
+	if resource.hasChanges() {
+		resource.Action = ScheduledTaskActionUpdate
+	} else {
+		resource.Action = ScheduledTaskActionNoop
+	}
+}
+
+func (resource *ScheduledTaskResource) hasChanges() bool {
+	if resource.Current == nil || resource.Desired == nil {
+		return true
+	}
+
+	current := resource.Current
+	desired := resource.Desired
+
+	if resource.ScheduleExpression() != aws.ToString(current.ScheduleExpression) {
+		return true
+	}
+
+	if current.Target == nil || current.Target.EcsParameters == nil {
+		return true
+	}
+
+	ecsParams := current.Target.EcsParameters
+
+	if aws.ToString(ecsParams.TaskDefinitionArn) != resource.TaskDefinitionArn {
+		return true
+	}
+
+	if int(aws.ToInt32(ecsParams.TaskCount)) != desired.TaskCount {
+		return true
+	}
+
+	if string(ecsParams.LaunchType) != desired.LaunchType {
+		return true
+	}
+
+	if aws.ToString(ecsParams.PlatformVersion) != desired.PlatformVersion {
+		return true
+	}
+
+	if aws.ToString(ecsParams.Group) != desired.Group {
+		return true
+	}
+
+	if !networkConfigMatches(ecsParams.NetworkConfiguration, desired.NetworkConfiguration) {
+		return true
+	}
+
+	return false
+}
+
+func networkConfigMatches(current *types.NetworkConfiguration, desired *config.NetworkConfiguration) bool {
+	if current == nil && desired == nil {
+		return true
+	}
+	if current == nil || desired == nil {
+		return false
+	}
+	if current.AwsvpcConfiguration == nil {
+		return desired == nil
+	}
+
+	awsvpc := current.AwsvpcConfiguration
+
+	if !stringSlicesEqual(awsvpc.Subnets, desired.Subnets) {
+		return false
+	}
+	if !stringSlicesEqual(awsvpc.SecurityGroups, desired.SecurityGroups) {
+		return false
+	}
+	if string(awsvpc.AssignPublicIp) != desired.AssignPublicIp {
+		return false
+	}
+
+	return true
 }
 
 func (m *ScheduledTaskManager) Create(ctx context.Context, resource *ScheduledTaskResource) error {
@@ -265,11 +349,13 @@ func (m *ScheduledTaskManager) Create(ctx context.Context, resource *ScheduledTa
 		return err
 	}
 
-	if err := m.schedulerClient.CreateSchedule(ctx, input); err != nil {
+	arn, err := m.schedulerClient.CreateSchedule(ctx, input)
+	if err != nil {
 		return err
 	}
 
-	return m.applyScheduleTags(ctx, resource)
+	resource.Arn = arn
+	return nil
 }
 
 func (m *ScheduledTaskManager) Update(ctx context.Context, resource *ScheduledTaskResource) error {
@@ -278,11 +364,7 @@ func (m *ScheduledTaskManager) Update(ctx context.Context, resource *ScheduledTa
 		return err
 	}
 
-	if err := m.schedulerClient.UpdateSchedule(ctx, input); err != nil {
-		return err
-	}
-
-	return m.applyScheduleTags(ctx, resource)
+	return m.schedulerClient.UpdateSchedule(ctx, input)
 }
 
 func (m *ScheduledTaskManager) Delete(ctx context.Context, resource *ScheduledTaskResource) error {
@@ -305,71 +387,12 @@ func (m *ScheduledTaskManager) Apply(ctx context.Context, resource *ScheduledTas
 	}
 }
 
-func (m *ScheduledTaskManager) applyScheduleTags(ctx context.Context, resource *ScheduledTaskResource) error {
-	if resource == nil || resource.Desired == nil {
-		return nil
+func getClusterArn(cluster string) string {
+	if strings.HasPrefix(cluster, "arn:") {
+		return cluster
 	}
-	if len(resource.Desired.Tags) == 0 {
-		return nil
-	}
-
-	schedule, err := m.schedulerClient.GetSchedule(ctx, resource.Name, m.groupName)
-	if err != nil {
-		return err
-	}
-	arn := aws.ToString(schedule.Arn)
-	if arn == "" {
-		return nil
-	}
-
-	currentTags, err := m.schedulerClient.ListTagsForResource(ctx, arn)
-	if err != nil {
-		return err
-	}
-
-	desiredTags := make(map[string]string, len(resource.Desired.Tags))
-	for _, tag := range resource.Desired.Tags {
-		if tag.Key == "" {
-			continue
-		}
-		desiredTags[tag.Key] = tag.Value
-	}
-
-	var addTags []types.Tag
-	for key, value := range desiredTags {
-		if current, ok := currentTags[key]; !ok || current != value {
-			addTags = append(addTags, types.Tag{
-				Key:   aws.String(key),
-				Value: aws.String(value),
-			})
-		}
-	}
-
-	var removeKeys []string
-	for key := range currentTags {
-		if _, ok := desiredTags[key]; !ok {
-			removeKeys = append(removeKeys, key)
-		}
-	}
-
-	if err := m.schedulerClient.TagResource(ctx, arn, addTags); err != nil {
-		return err
-	}
-	if err := m.schedulerClient.UntagResource(ctx, arn, removeKeys); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func getRegionFromCluster(cluster string) string {
-	if strings.HasPrefix(cluster, "arn:aws:ecs:") {
-		parts := strings.Split(cluster, ":")
-		if len(parts) >= 4 {
-			return parts[3]
-		}
-	}
-	return "us-east-1"
+	log.Warn("scheduled task cluster should be a full ARN", "cluster", cluster)
+	return cluster
 }
 
 type ecsTaskOverrideInput struct {
@@ -438,4 +461,69 @@ func (r *ScheduledTaskResource) buildOverridesInput() string {
 	}
 
 	return string(data)
+}
+
+func (m *ScheduledTaskManager) FindOrphans(ctx context.Context, manifestName string, desiredNames map[string]bool, manifestTags map[string]string) ([]*ScheduledTaskResource, error) {
+	if manifestName == "" {
+		return nil, nil
+	}
+
+	namePrefix := manifestName + "-"
+	schedules, err := m.schedulerClient.ListSchedules(ctx, m.groupName, namePrefix)
+	if err != nil {
+		log.Debug("failed to list schedules for orphan detection", "prefix", namePrefix, "error", err)
+		return nil, nil
+	}
+
+	var orphans []*ScheduledTaskResource
+	for _, sched := range schedules {
+		scheduleName := aws.ToString(sched.Name)
+		if desiredNames[scheduleName] {
+			continue
+		}
+
+		schedArn := aws.ToString(sched.Arn)
+		if schedArn == "" {
+			continue
+		}
+
+		tags, err := m.schedulerClient.ListTagsForResource(ctx, schedArn)
+		if err != nil {
+			log.Debug("failed to list schedule tags", "arn", schedArn, "error", err)
+			continue
+		}
+
+		if !matchesManifestTags(tags, manifestTags) {
+			log.Debug("schedule not owned by manifest", "name", scheduleName, "tags", tags)
+			continue
+		}
+
+		current, err := m.schedulerClient.GetSchedule(ctx, scheduleName, m.groupName)
+		if err != nil {
+			log.Debug("failed to get schedule details for orphan", "name", scheduleName, "error", err)
+		}
+
+		orphans = append(orphans, &ScheduledTaskResource{
+			Name:    scheduleName,
+			Desired: nil,
+			Current: current,
+			Action:  ScheduledTaskActionDelete,
+			Arn:     schedArn,
+		})
+
+		log.Debug("found orphan schedule", "name", scheduleName)
+	}
+
+	return orphans, nil
+}
+
+func ResolveScheduledTaskName(manifestName, taskName string) string {
+	if manifestName == "" {
+		return taskName
+	}
+	prefix := manifestName + "-"
+	if strings.HasPrefix(taskName, prefix) {
+		return taskName
+	}
+	return prefix + taskName
 }

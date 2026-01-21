@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 
 	"github.com/x-qdo/ecsmate/internal/config"
@@ -217,13 +218,22 @@ func TestScheduledTaskResource_DetermineAction_Create(t *testing.T) {
 
 func TestScheduledTaskResource_DetermineAction_Update(t *testing.T) {
 	resource := &ScheduledTaskResource{
-		Name: "existing-task",
+		Name:              "existing-task",
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123:task-definition/cron:2",
 		Desired: &config.ScheduledTask{
-			TaskDefinition: "cron",
-			Cluster:        "test",
+			ScheduleType:       "cron",
+			ScheduleExpression: "0 2 * * ? *",
+			TaskCount:          1,
 		},
-		Current: &types.ScheduleSummary{
-			Name: aws.String("existing-task"),
+		Current: &scheduler.GetScheduleOutput{
+			Name:               aws.String("existing-task"),
+			ScheduleExpression: aws.String("cron(0 1 * * ? *)"),
+			Target: &types.Target{
+				EcsParameters: &types.EcsParameters{
+					TaskDefinitionArn: aws.String("arn:aws:ecs:us-east-1:123:task-definition/cron:1"),
+					TaskCount:         aws.Int32(1),
+				},
+			},
 		},
 	}
 
@@ -234,32 +244,56 @@ func TestScheduledTaskResource_DetermineAction_Update(t *testing.T) {
 	}
 }
 
-func TestGetRegionFromCluster(t *testing.T) {
+func TestScheduledTaskResource_DetermineAction_Noop(t *testing.T) {
+	resource := &ScheduledTaskResource{
+		Name:              "existing-task",
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123:task-definition/cron:1",
+		Desired: &config.ScheduledTask{
+			ScheduleType:       "cron",
+			ScheduleExpression: "0 2 * * ? *",
+			TaskCount:          1,
+		},
+		Current: &scheduler.GetScheduleOutput{
+			Name:               aws.String("existing-task"),
+			ScheduleExpression: aws.String("cron(0 2 * * ? *)"),
+			Target: &types.Target{
+				EcsParameters: &types.EcsParameters{
+					TaskDefinitionArn: aws.String("arn:aws:ecs:us-east-1:123:task-definition/cron:1"),
+					TaskCount:         aws.Int32(1),
+				},
+			},
+		},
+	}
+
+	resource.determineAction()
+
+	if resource.Action != ScheduledTaskActionNoop {
+		t.Errorf("expected action NOOP, got %s", resource.Action)
+	}
+}
+
+func TestGetClusterArn(t *testing.T) {
 	tests := []struct {
 		cluster  string
 		expected string
 	}{
 		{
 			cluster:  "arn:aws:ecs:us-west-2:123456789:cluster/my-cluster",
-			expected: "us-west-2",
+			expected: "arn:aws:ecs:us-west-2:123456789:cluster/my-cluster",
 		},
 		{
 			cluster:  "arn:aws:ecs:eu-central-1:123456789:cluster/prod",
-			expected: "eu-central-1",
+			expected: "arn:aws:ecs:eu-central-1:123456789:cluster/prod",
 		},
 		{
 			cluster:  "my-cluster",
-			expected: "us-east-1",
-		},
-		{
-			cluster:  "simple-name",
-			expected: "us-east-1",
+			expected: "my-cluster",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.cluster, func(t *testing.T) {
-			result := getRegionFromCluster(tt.cluster)
+			result := getClusterArn(tt.cluster)
 			if result != tt.expected {
 				t.Errorf("expected '%s', got '%s'", tt.expected, result)
 			}
@@ -481,5 +515,105 @@ func TestBuildOverridesInput_ListConcat(t *testing.T) {
 	expectedCommand := `"command":["php","/var/www/ucb/composer_projects/console/bin/console","artisan","queue:work"]`
 	if !strings.Contains(inputJSON, expectedCommand) {
 		t.Errorf("expected input to contain %q, got: %s", expectedCommand, inputJSON)
+	}
+}
+
+func TestResolveScheduledTaskName(t *testing.T) {
+	tests := []struct {
+		manifestName string
+		taskName     string
+		expected     string
+	}{
+		{
+			manifestName: "myapp",
+			taskName:     "cron",
+			expected:     "myapp-cron",
+		},
+		{
+			manifestName: "myapp",
+			taskName:     "myapp-cron",
+			expected:     "myapp-cron",
+		},
+		{
+			manifestName: "",
+			taskName:     "cron",
+			expected:     "cron",
+		},
+		{
+			manifestName: "webapp",
+			taskName:     "daily-sync",
+			expected:     "webapp-daily-sync",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.manifestName+"/"+tt.taskName, func(t *testing.T) {
+			result := ResolveScheduledTaskName(tt.manifestName, tt.taskName)
+			if result != tt.expected {
+				t.Errorf("ResolveScheduledTaskName(%q, %q) = %q, want %q",
+					tt.manifestName, tt.taskName, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildSchedulerTags(t *testing.T) {
+	manifestTags := map[string]string{
+		"Environment": "prod",
+		"Team":        "platform",
+	}
+
+	tags := BuildSchedulerTags(manifestTags)
+
+	hasManagedBy := false
+	hasEnvironment := false
+	hasTeam := false
+
+	for _, tag := range tags {
+		key := aws.ToString(tag.Key)
+		value := aws.ToString(tag.Value)
+
+		switch key {
+		case TagKeyManagedBy:
+			if value != TagValueEcsmate {
+				t.Errorf("expected ManagedBy=%s, got %s", TagValueEcsmate, value)
+			}
+			hasManagedBy = true
+		case "Environment":
+			if value != "prod" {
+				t.Errorf("expected Environment=prod, got %s", value)
+			}
+			hasEnvironment = true
+		case "Team":
+			if value != "platform" {
+				t.Errorf("expected Team=platform, got %s", value)
+			}
+			hasTeam = true
+		}
+	}
+
+	if !hasManagedBy {
+		t.Error("expected ManagedBy tag")
+	}
+	if !hasEnvironment {
+		t.Error("expected Environment tag")
+	}
+	if !hasTeam {
+		t.Error("expected Team tag")
+	}
+}
+
+func TestBuildSchedulerTags_EmptyManifestTags(t *testing.T) {
+	tags := BuildSchedulerTags(nil)
+
+	if len(tags) != 1 {
+		t.Errorf("expected 1 tag (ManagedBy), got %d", len(tags))
+	}
+
+	if aws.ToString(tags[0].Key) != TagKeyManagedBy {
+		t.Errorf("expected ManagedBy tag, got %s", aws.ToString(tags[0].Key))
+	}
+	if aws.ToString(tags[0].Value) != TagValueEcsmate {
+		t.Errorf("expected value %s, got %s", TagValueEcsmate, aws.ToString(tags[0].Value))
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+
 	"github.com/x-qdo/ecsmate/internal/aws"
 	"github.com/x-qdo/ecsmate/internal/config"
 	"github.com/x-qdo/ecsmate/internal/log"
@@ -783,7 +785,18 @@ func (e *Executor) applyScheduledTasks(ctx context.Context, plan *ExecutionPlan)
 		return nil
 	}
 
+	if e.schedulerClient != nil {
+		if err := e.schedulerClient.EnsureScheduleGroup(ctx, e.scheduledManager.GroupName()); err != nil {
+			return fmt.Errorf("failed to ensure schedule group: %w", err)
+		}
+	}
+
 	e.tracker.PrintSection("\nScheduled Tasks")
+
+	manifestTags := make(map[string]string)
+	if plan.Manifest != nil {
+		manifestTags = plan.Manifest.Tags
+	}
 
 	for _, task := range plan.ScheduledTasks {
 		e.tracker.AddTask(task.Name, "scheduled-task")
@@ -800,10 +813,33 @@ func (e *Executor) applyScheduledTasks(ctx context.Context, plan *ExecutionPlan)
 			return fmt.Errorf("scheduled task %s: %w", task.Name, err)
 		}
 
+		if task.Action == resources.ScheduledTaskActionCreate || task.Action == resources.ScheduledTaskActionUpdate {
+			if err := e.tagSchedule(ctx, task, manifestTags); err != nil {
+				log.Debug("failed to tag schedule", "name", task.Name, "error", err)
+			}
+		}
+
 		e.tracker.CompleteTask(task.Name, task.ScheduleExpression())
 	}
 
 	return nil
+}
+
+func (e *Executor) tagSchedule(ctx context.Context, task *resources.ScheduledTaskResource, manifestTags map[string]string) error {
+	if e.schedulerClient == nil {
+		return nil
+	}
+
+	arn := task.Arn
+	if arn == "" && task.Current != nil {
+		arn = awssdk.ToString(task.Current.Arn)
+	}
+	if arn == "" {
+		return nil
+	}
+
+	tags := resources.BuildSchedulerTags(manifestTags)
+	return e.schedulerClient.TagResource(ctx, arn, tags)
 }
 
 func (e *Executor) Tracker() *Tracker {
