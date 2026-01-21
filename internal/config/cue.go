@@ -11,10 +11,11 @@ import (
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/cuecontext"
+	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/load"
 
-	"github.com/qdo/ecsmate/internal/log"
-	schema "github.com/qdo/ecsmate/pkg/cue"
+	"github.com/x-qdo/ecsmate/internal/log"
+	schema "github.com/x-qdo/ecsmate/pkg/cue"
 )
 
 // Schema files are loaded from pkg/cue at runtime
@@ -45,7 +46,7 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	// Use virtual module root if no real one found
 	if moduleRoot == "" || modulePath == "" {
 		moduleRoot = "/virtual/ecsmate"
-		modulePath = "github.com/qdo/ecsmate"
+		modulePath = "github.com/x-qdo/ecsmate"
 	}
 	cfg.ModuleRoot = moduleRoot
 	cfg.Module = modulePath
@@ -121,13 +122,12 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 
 	inst := instances[0]
 	if inst.Err != nil {
-		return cue.Value{}, fmt.Errorf("failed to load CUE instance: %w", inst.Err)
+		return cue.Value{}, NewCUELoadError(inst.Err.Error(), nil)
 	}
 
-	// Build the value first
 	value := l.ctx.BuildInstance(inst)
 	if value.Err() != nil {
-		return cue.Value{}, fmt.Errorf("failed to build CUE value:\n%s", formatCUEValidationError(value, value.Err()))
+		return cue.Value{}, NewCUEBuildError(value.Err().Error(), collectCUEErrors(value.Err()))
 	}
 
 	// Apply --set overrides after building using FillPath
@@ -139,19 +139,26 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 		}
 	}
 
-	// Check for schema import (strict mode)
 	if !HasSchemaImport(inst) {
-		return cue.Value{}, fmt.Errorf("strict mode: manifest must import schema package\n\nAdd to your CUE file:\n  import \"github.com/qdo/ecsmate/pkg/cue:schema\"\n  manifest: schema.#Manifest & { ... }")
+		err := &ManifestError{
+			Phase:   "load",
+			Summary: "manifest must import schema package",
+			Hint:    "Add to your CUE file:\n  import \"github.com/x-qdo/ecsmate/pkg/cue:schema\"\n  manifest: schema.#Manifest & { ... }",
+		}
+		return cue.Value{}, err
 	}
 
-	// Validate against schema
 	if err := value.Validate(); err != nil {
-		return cue.Value{}, fmt.Errorf("CUE schema validation failed:\n%s", formatCUEValidationError(value, err))
+		return cue.Value{}, NewCUEValidationError(err.Error(), collectCUEErrors(err))
 	}
 
-	// Verify manifest is constrained by schema
 	if !IsManifestConstrained(value) {
-		return cue.Value{}, fmt.Errorf("strict mode: manifest must be constrained by schema.#Manifest\n\nUse: manifest: schema.#Manifest & { ... }")
+		err := &ManifestError{
+			Phase:   "validate",
+			Summary: "manifest must be constrained by schema.#Manifest",
+			Hint:    "Use: manifest: schema.#Manifest & { ... }",
+		}
+		return cue.Value{}, err
 	}
 
 	return value, nil
@@ -238,24 +245,41 @@ func readCueModule(path string) (string, error) {
 	return "", nil
 }
 
-// formatCUEValidationError formats a CUE validation error with verbose details.
-func formatCUEValidationError(value cue.Value, err error) string {
-	var sb strings.Builder
-	sb.WriteString(err.Error())
-	sb.WriteString("\n\nCUE Validation Details:\n")
+func collectCUEErrors(err error) []string {
+	if err == nil {
+		return nil
+	}
 
-	value.Walk(func(v cue.Value) bool {
-		if v.Err() != nil {
-			path := v.Path().String()
-			if path == "" {
-				path = "<root>"
-			}
-			sb.WriteString(fmt.Sprintf("  - %s: %v\n", path, v.Err()))
+	seen := make(map[string]bool)
+	var details []string
+
+	for _, e := range errors.Errors(err) {
+		pathParts := e.Path()
+		path := strings.Join(pathParts, ".")
+		if path == "" {
+			path = "<root>"
 		}
-		return true
-	}, nil)
 
-	return sb.String()
+		pos := e.Position()
+		var location string
+		if pos.IsValid() {
+			location = fmt.Sprintf(" (%s:%d:%d)", pos.Filename(), pos.Line(), pos.Column())
+		}
+
+		msg := e.Error()
+		if strings.HasPrefix(msg, path+":") {
+			msg = strings.TrimPrefix(msg, path+":")
+			msg = strings.TrimSpace(msg)
+		}
+
+		detail := fmt.Sprintf("%s: %s%s", path, msg, location)
+		if !seen[detail] {
+			seen[detail] = true
+			details = append(details, detail)
+		}
+	}
+
+	return details
 }
 
 // applySetValues applies --set key=value overrides using FillPath
@@ -424,7 +448,7 @@ func ExtractStringSlice(v cue.Value, path string) ([]string, error) {
 // HasSchemaImport checks if the CUE instance imports the schema package
 func HasSchemaImport(inst *build.Instance) bool {
 	for _, imp := range inst.Imports {
-		if imp.ImportPath == "github.com/qdo/ecsmate/pkg/cue:schema" {
+		if imp.ImportPath == "github.com/x-qdo/ecsmate/pkg/cue:schema" {
 			return true
 		}
 	}
@@ -451,7 +475,7 @@ func buildSchemaOverlay(moduleRoot string) map[string]load.Source {
 	overlay := make(map[string]load.Source)
 
 	// Add module.cue to establish module identity
-	moduleCue := `module: "github.com/qdo/ecsmate"
+	moduleCue := `module: "github.com/x-qdo/ecsmate"
 language: { version: "v0.11.0" }`
 	overlay[filepath.Join(moduleRoot, "cue.mod", "module.cue")] = load.FromString(moduleCue)
 

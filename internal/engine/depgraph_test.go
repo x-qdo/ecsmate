@@ -3,8 +3,8 @@ package engine
 import (
 	"testing"
 
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/resources"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 func TestDependencyGraph_TopologicalSort_Simple(t *testing.T) {

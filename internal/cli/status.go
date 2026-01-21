@@ -9,8 +9,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	awsclient "github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/log"
+	awsclient "github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var (
@@ -82,7 +82,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 		manifest, err := loadManifest(ctx, &opts, ssmClient)
 		if err != nil {
-			log.Error("failed to load manifest", "error", err)
+			printManifestError(err, !opts.NoColor)
 			os.Exit(ExitCodeError)
 		}
 

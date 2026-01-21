@@ -6,7 +6,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 
-	"github.com/qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/config"
 )
 
 func TestServiceResource_ToCreateInput(t *testing.T) {
@@ -1060,5 +1060,238 @@ func TestServiceResource_Validate_InvalidServiceRegistry(t *testing.T) {
 	err := resource.Validate()
 	if err == nil {
 		t.Error("expected error for invalid service registry")
+	}
+}
+
+func TestServiceResource_CapacityProviderStrategyChanged_LaunchTypeToCP(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name: "web",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 1},
+			},
+		},
+		Current: &types.Service{
+			ServiceName:              aws.String("web"),
+			LaunchType:               types.LaunchTypeFargate,
+			CapacityProviderStrategy: nil,
+		},
+	}
+
+	if !resource.capacityProviderStrategyChanged() {
+		t.Error("expected change when switching from launch type to capacity provider")
+	}
+}
+
+func TestServiceResource_CapacityProviderStrategyChanged_CPToLaunchType(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:                     "web",
+			LaunchType:               "FARGATE",
+			CapacityProviderStrategy: nil,
+		},
+		Current: &types.Service{
+			ServiceName: aws.String("web"),
+			CapacityProviderStrategy: []types.CapacityProviderStrategyItem{
+				{CapacityProvider: aws.String("FARGATE"), Weight: 1},
+			},
+		},
+	}
+
+	if !resource.capacityProviderStrategyChanged() {
+		t.Error("expected change when switching from capacity provider to launch type")
+	}
+}
+
+func TestServiceResource_CapacityProviderStrategyChanged_CPModified(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name: "web",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 2},
+			},
+		},
+		Current: &types.Service{
+			ServiceName: aws.String("web"),
+			CapacityProviderStrategy: []types.CapacityProviderStrategyItem{
+				{CapacityProvider: aws.String("FARGATE"), Weight: 1},
+			},
+		},
+	}
+
+	if !resource.capacityProviderStrategyChanged() {
+		t.Error("expected change when capacity provider weight changed")
+	}
+}
+
+func TestServiceResource_CapacityProviderStrategyChanged_CPAdded(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name: "web",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 1},
+				{CapacityProvider: "FARGATE_SPOT", Weight: 2},
+			},
+		},
+		Current: &types.Service{
+			ServiceName: aws.String("web"),
+			CapacityProviderStrategy: []types.CapacityProviderStrategyItem{
+				{CapacityProvider: aws.String("FARGATE"), Weight: 1},
+			},
+		},
+	}
+
+	if !resource.capacityProviderStrategyChanged() {
+		t.Error("expected change when capacity provider added")
+	}
+}
+
+func TestServiceResource_CapacityProviderStrategyChanged_NoChange(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name: "web",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 1, Base: 1},
+			},
+		},
+		Current: &types.Service{
+			ServiceName: aws.String("web"),
+			CapacityProviderStrategy: []types.CapacityProviderStrategyItem{
+				{CapacityProvider: aws.String("FARGATE"), Weight: 1, Base: 1},
+			},
+		},
+	}
+
+	if resource.capacityProviderStrategyChanged() {
+		t.Error("expected no change when capacity provider strategy is identical")
+	}
+}
+
+func TestServiceResource_CapacityProviderStrategyChanged_BothEmpty(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:                     "web",
+			CapacityProviderStrategy: nil,
+		},
+		Current: &types.Service{
+			ServiceName:              aws.String("web"),
+			CapacityProviderStrategy: nil,
+		},
+	}
+
+	if resource.capacityProviderStrategyChanged() {
+		t.Error("expected no change when both have no capacity provider strategy")
+	}
+}
+
+func TestServiceResource_HasChanges_CapacityProviderStrategy(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name: "web",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 1},
+			},
+		},
+		Current: &types.Service{
+			ServiceName:              aws.String("web"),
+			LaunchType:               types.LaunchTypeFargate,
+			CapacityProviderStrategy: nil,
+		},
+		TaskDefinitionArn: "",
+	}
+
+	if !resource.hasChanges() {
+		t.Error("expected hasChanges to detect capacity provider strategy change")
+	}
+}
+
+func TestServiceResource_ToUpdateInput_ForceNewDeployment_CPChange(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "web-service",
+			Cluster: "test-cluster",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 1},
+			},
+		},
+		Current: &types.Service{
+			ServiceName:              aws.String("web-service"),
+			LaunchType:               types.LaunchTypeFargate,
+			CapacityProviderStrategy: nil,
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	input, err := resource.ToUpdateInput()
+	if err != nil {
+		t.Fatalf("failed to create update input: %v", err)
+	}
+
+	if !input.ForceNewDeployment {
+		t.Error("expected ForceNewDeployment=true when switching to capacity provider strategy")
+	}
+}
+
+func TestServiceResource_ToUpdateInput_NoForceNewDeployment_SameCP(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "web-service",
+			Cluster: "test-cluster",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 1},
+			},
+		},
+		Current: &types.Service{
+			ServiceName:          aws.String("web-service"),
+			EnableExecuteCommand: false,
+			CapacityProviderStrategy: []types.CapacityProviderStrategyItem{
+				{CapacityProvider: aws.String("FARGATE"), Weight: 1},
+			},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	input, err := resource.ToUpdateInput()
+	if err != nil {
+		t.Fatalf("failed to create update input: %v", err)
+	}
+
+	if input.ForceNewDeployment {
+		t.Error("expected ForceNewDeployment=false when capacity provider strategy unchanged")
+	}
+}
+
+func TestServiceResource_DetermineAction_Update_CPChange(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:    "web",
+			Cluster: "test",
+			CapacityProviderStrategy: []config.CapacityProviderStrategyItem{
+				{CapacityProvider: "FARGATE", Weight: 1},
+			},
+		},
+		Current: &types.Service{
+			ServiceName:              aws.String("web"),
+			TaskDefinition:           aws.String("arn:aws:ecs:us-east-1:123456789:task-definition/web:1"),
+			LaunchType:               types.LaunchTypeFargate,
+			CapacityProviderStrategy: nil,
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	resource.determineAction()
+
+	if resource.Action != ServiceActionUpdate {
+		t.Errorf("expected action UPDATE for capacity provider change, got %s", resource.Action)
 	}
 }

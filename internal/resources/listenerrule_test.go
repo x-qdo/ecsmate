@@ -6,7 +6,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
-	"github.com/qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/config"
 )
 
 func TestListenerRuleResource_DetermineAction_NoChange(t *testing.T) {
@@ -273,8 +273,14 @@ func TestBuildResourcesWithExisting_DetectsOrphanedRules(t *testing.T) {
 		0: "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/myapp-r100/abc",
 	}
 
+	tgTags := map[string]map[string]string{
+		"arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/myapp-r200/xyz": {
+			TagKeyManagedBy: TagValueEcsmate,
+		},
+	}
+
 	mgr := &ListenerRuleManager{}
-	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, manifestName)
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, manifestName, nil, tgTags)
 
 	if len(resources) != 2 {
 		t.Fatalf("expected 2 resources (1 manifest + 1 orphaned), got %d", len(resources))
@@ -331,7 +337,7 @@ func TestBuildResourcesWithExisting_SkipsDefaultRule(t *testing.T) {
 	}
 
 	mgr := &ListenerRuleManager{}
-	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, nil, existingRules, "myapp")
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, nil, existingRules, "myapp", nil, nil)
 
 	if len(resources) != 0 {
 		t.Errorf("expected 0 resources (default rule should be skipped), got %d", len(resources))
@@ -514,11 +520,15 @@ func TestBuildResourcesWithExisting_FiltersOrphansByOwnership(t *testing.T) {
 		0: "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/myapp-r100/abc",
 	}
 
-	mgr := &ListenerRuleManager{}
-	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, manifestName)
+	tgTags := map[string]map[string]string{
+		"arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/myapp-r200/xyz": {
+			TagKeyManagedBy: TagValueEcsmate,
+		},
+	}
 
-	// Should have 2 resources: manifest rule (NOOP) + owned orphan (DELETE)
-	// The otherapp-r300 rule should NOT be included
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, manifestName, nil, tgTags)
+
 	if len(resources) != 2 {
 		t.Fatalf("expected 2 resources (1 manifest + 1 owned orphan), got %d", len(resources))
 	}
@@ -547,6 +557,99 @@ func TestBuildResourcesWithExisting_FiltersOrphansByOwnership(t *testing.T) {
 	}
 	if orphanedResource.Action != ListenerRuleActionDelete {
 		t.Errorf("expected owned orphaned rule action DELETE, got %s", orphanedResource.Action)
+	}
+}
+
+func TestBuildResourcesWithExisting_FiltersOrphansByManifestTags(t *testing.T) {
+	listenerArn := "arn:aws:elasticloadbalancing:us-east-1:123:listener/app/my-alb/abc"
+	manifestName := "cal"
+	manifestTags := map[string]string{
+		"Environment": "stage",
+		"Tenant":      "cal",
+	}
+
+	manifestRules := []config.IngressRule{
+		{
+			Priority: 100,
+			Host:     "cal.stage.example.com",
+			Service: &config.IngressServiceBackend{
+				Name:          "web",
+				ContainerName: "app",
+				ContainerPort: 80,
+			},
+		},
+	}
+
+	existingRules := []types.Rule{
+		{
+			RuleArn:  aws.String("arn:rule/100"),
+			Priority: aws.String("100"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"cal.stage.example.com"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:tg/cal-r100/a")},
+			},
+		},
+		{
+			RuleArn:  aws.String("arn:rule/101"),
+			Priority: aws.String("101"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"cal.stage.old.com"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:tg/cal-r101/b")},
+			},
+		},
+		{
+			RuleArn:  aws.String("arn:rule/102"),
+			Priority: aws.String("102"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"cal.prod.example.com"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:tg/cal-r102/c")},
+			},
+		},
+	}
+
+	targetGroupArns := map[int]string{
+		0: "arn:tg/cal-r100/a",
+	}
+
+	tgTags := map[string]map[string]string{
+		"arn:tg/cal-r101/b": {
+			TagKeyManagedBy: TagValueEcsmate,
+			"Environment":   "stage",
+			"Tenant":        "cal",
+		},
+		"arn:tg/cal-r102/c": {
+			TagKeyManagedBy: TagValueEcsmate,
+			"Environment":   "prod",
+			"Tenant":        "cal",
+		},
+	}
+
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, manifestName, manifestTags, tgTags)
+
+	if len(resources) != 2 {
+		t.Fatalf("expected 2 resources (1 manifest + 1 matching orphan), got %d", len(resources))
+	}
+
+	for _, r := range resources {
+		switch r.Priority {
+		case 100:
+			if r.Action != ListenerRuleActionNoop {
+				t.Errorf("priority 100: expected NOOP, got %s", r.Action)
+			}
+		case 101:
+			if r.Action != ListenerRuleActionDelete {
+				t.Errorf("priority 101: expected DELETE (same env/tenant), got %s", r.Action)
+			}
+		case 102:
+			t.Error("priority 102 should NOT be included - different Environment (prod vs stage)")
+		}
 	}
 }
 
@@ -579,10 +682,17 @@ func TestBuildResourcesWithExisting_NoManifestNameDeletesAll(t *testing.T) {
 		},
 	}
 
-	mgr := &ListenerRuleManager{}
+	tgTags := map[string]map[string]string{
+		"arn:tg/myapp-r100/x": {
+			TagKeyManagedBy: TagValueEcsmate,
+		},
+		"arn:tg/otherapp-r200/y": {
+			TagKeyManagedBy: TagValueEcsmate,
+		},
+	}
 
-	// Without manifest name, all orphans should be deleted (backwards compatible)
-	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, nil, existingRules, "")
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, nil, existingRules, "", nil, tgTags)
 
 	if len(resources) != 2 {
 		t.Fatalf("expected 2 orphaned resources when no manifest name, got %d", len(resources))

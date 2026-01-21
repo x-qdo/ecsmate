@@ -9,11 +9,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type SSMClient struct {
 	client *ssm.Client
+}
+
+func (c *SSMClient) Client() *ssm.Client {
+	return c.client
 }
 
 func NewSSMClient(ctx context.Context, region string) (*SSMClient, error) {

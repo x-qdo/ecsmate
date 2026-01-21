@@ -6,15 +6,28 @@ import (
 
 	"cuelang.org/go/cue"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type Manifest struct {
 	Name            string
+	Tags            map[string]string
+	Secrets         *SecretsConfig
 	TaskDefinitions map[string]TaskDefinition
 	Services        map[string]Service
 	ScheduledTasks  map[string]ScheduledTask
 	Ingress         *Ingress
+}
+
+type SecretsConfig struct {
+	Managed  *ManagedSecretsConfig
+	External map[string]string
+}
+
+type ManagedSecretsConfig struct {
+	File      string
+	KMSKeyArn string
+	SSMPrefix string
 }
 
 type LogGroup struct {
@@ -404,14 +417,63 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 	log.Debug("parsing manifest from CUE value")
 
 	manifest := &Manifest{
+		Tags:            make(map[string]string),
 		TaskDefinitions: make(map[string]TaskDefinition),
 		Services:        make(map[string]Service),
 		ScheduledTasks:  make(map[string]ScheduledTask),
 	}
 
-	// Extract name
 	if name, err := ExtractString(value, "name"); err == nil {
 		manifest.Name = name
+	}
+
+	tags := value.LookupPath(cue.ParsePath("tags"))
+	if tags.Exists() {
+		iter, err := tags.Fields()
+		if err == nil {
+			for iter.Next() {
+				if val, err := iter.Value().String(); err == nil {
+					key := iter.Selector().String()
+					key = strings.Trim(key, "\"")
+					manifest.Tags[key] = val
+				}
+			}
+		}
+	}
+
+	secretsVal := value.LookupPath(cue.ParsePath("secrets"))
+	if secretsVal.Exists() {
+		manifest.Secrets = &SecretsConfig{
+			External: make(map[string]string),
+		}
+
+		managed := secretsVal.LookupPath(cue.ParsePath("managed"))
+		if managed.Exists() {
+			manifest.Secrets.Managed = &ManagedSecretsConfig{}
+			if file, err := ExtractString(managed, "file"); err == nil {
+				manifest.Secrets.Managed.File = file
+			}
+			if kmsArn, err := ExtractString(managed, "kmsKeyArn"); err == nil {
+				manifest.Secrets.Managed.KMSKeyArn = kmsArn
+			}
+			if prefix, err := ExtractString(managed, "ssmPrefix"); err == nil {
+				manifest.Secrets.Managed.SSMPrefix = prefix
+			}
+		}
+
+		external := secretsVal.LookupPath(cue.ParsePath("external"))
+		if external.Exists() {
+			iter, err := external.Fields()
+			if err == nil {
+				for iter.Next() {
+					if val, err := iter.Value().String(); err == nil {
+						key := iter.Selector().String()
+						key = strings.Trim(key, "\"")
+						manifest.Secrets.External[key] = val
+					}
+				}
+			}
+		}
 	}
 
 	// Parse task definitions
@@ -591,38 +653,30 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 		cd.EntryPoint = ep
 	}
 
-	// Parse environment
 	env := v.LookupPath(cue.ParsePath("environment"))
 	if env.Exists() {
-		iter, err := env.List()
+		iter, err := env.Fields()
 		if err == nil {
 			for iter.Next() {
-				kv := KeyValuePair{}
-				if name, err := ExtractString(iter.Value(), "name"); err == nil {
-					kv.Name = name
+				if val, err := iter.Value().String(); err == nil {
+					key := iter.Selector().String()
+					key = strings.Trim(key, "\"")
+					cd.Environment = append(cd.Environment, KeyValuePair{Name: key, Value: val})
 				}
-				if value, err := ExtractString(iter.Value(), "value"); err == nil {
-					kv.Value = value
-				}
-				cd.Environment = append(cd.Environment, kv)
 			}
 		}
 	}
 
-	// Parse secrets
 	secrets := v.LookupPath(cue.ParsePath("secrets"))
 	if secrets.Exists() {
-		iter, err := secrets.List()
+		iter, err := secrets.Fields()
 		if err == nil {
 			for iter.Next() {
-				s := Secret{}
-				if name, err := ExtractString(iter.Value(), "name"); err == nil {
-					s.Name = name
+				if val, err := iter.Value().String(); err == nil {
+					key := iter.Selector().String()
+					key = strings.Trim(key, "\"")
+					cd.Secrets = append(cd.Secrets, Secret{Name: key, ValueFrom: val})
 				}
-				if vf, err := ExtractString(iter.Value(), "valueFrom"); err == nil {
-					s.ValueFrom = vf
-				}
-				cd.Secrets = append(cd.Secrets, s)
 			}
 		}
 	}
@@ -680,6 +734,19 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 		}
 		if kmsKey, err := ExtractString(logConfig, "kmsKeyId"); err == nil {
 			cd.LogConfiguration.KMSKeyID = kmsKey
+		}
+		secretOpts := logConfig.LookupPath(cue.ParsePath("secretOptions"))
+		if secretOpts.Exists() {
+			iter, err := secretOpts.Fields()
+			if err == nil {
+				for iter.Next() {
+					if val, err := iter.Value().String(); err == nil {
+						key := iter.Selector().String()
+						key = strings.Trim(key, "\"")
+						cd.LogConfiguration.SecretOptions = append(cd.LogConfiguration.SecretOptions, Secret{Name: key, ValueFrom: val})
+					}
+				}
+			}
 		}
 		logTags := logConfig.LookupPath(cue.ParsePath("logGroupTags"))
 		if logTags.Exists() {
@@ -970,20 +1037,16 @@ func parseHook(v cue.Value) (*Hook, error) {
 				co.Command = command
 			}
 
-			// Parse environment
 			env := iter.Value().LookupPath(cue.ParsePath("environment"))
 			if env.Exists() {
-				envIter, err := env.List()
+				envIter, err := env.Fields()
 				if err == nil {
 					for envIter.Next() {
-						kv := KeyValuePair{}
-						if key, err := ExtractString(envIter.Value(), "name"); err == nil {
-							kv.Name = key
+						if val, err := envIter.Value().String(); err == nil {
+							key := envIter.Selector().String()
+							key = strings.Trim(key, "\"")
+							co.Environment = append(co.Environment, KeyValuePair{Name: key, Value: val})
 						}
-						if val, err := ExtractString(envIter.Value(), "value"); err == nil {
-							kv.Value = val
-						}
-						co.Environment = append(co.Environment, kv)
 					}
 				}
 			}
@@ -1068,17 +1131,14 @@ func parseScheduledTask(name string, v cue.Value) (ScheduledTask, error) {
 					}
 					env := iter.Value().LookupPath(cue.ParsePath("environment"))
 					if env.Exists() {
-						envIter, err := env.List()
+						envIter, err := env.Fields()
 						if err == nil {
 							for envIter.Next() {
-								kv := KeyValuePair{}
-								if key, err := ExtractString(envIter.Value(), "name"); err == nil {
-									kv.Name = key
+								if val, err := envIter.Value().String(); err == nil {
+									key := envIter.Selector().String()
+									key = strings.Trim(key, "\"")
+									co.Environment = append(co.Environment, KeyValuePair{Name: key, Value: val})
 								}
-								if val, err := ExtractString(envIter.Value(), "value"); err == nil {
-									kv.Value = val
-								}
-								co.Environment = append(co.Environment, kv)
 							}
 						}
 					}
@@ -1175,6 +1235,27 @@ func parseIngress(v cue.Value) (*Ingress, error) {
 	}
 
 	return ing, nil
+}
+
+// ResolveManagedSecrets resolves managed secret references in container definitions.
+// It replaces ARN values matching the managed prefix with actual SSM parameter ARNs.
+func (m *Manifest) ResolveManagedSecrets(managedSecrets *ManagedSecrets) {
+	if managedSecrets == nil || len(managedSecrets.Decrypted) == 0 {
+		return
+	}
+
+	arnMap := managedSecrets.BuildARNMap()
+
+	for tdName, td := range m.TaskDefinitions {
+		for i, cd := range td.ContainerDefinitions {
+			for j, secret := range cd.Secrets {
+				// Check if this is a managed secret reference (just the key name, no ARN)
+				if arn, ok := arnMap[secret.ValueFrom]; ok {
+					m.TaskDefinitions[tdName].ContainerDefinitions[i].Secrets[j].ValueFrom = arn
+				}
+			}
+		}
+	}
 }
 
 func parseIngressRule(v cue.Value) (IngressRule, error) {

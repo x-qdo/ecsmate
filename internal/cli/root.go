@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"errors"
+	"os"
+
 	"github.com/spf13/cobra"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var (
@@ -48,6 +52,7 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(templateCmd)
+	rootCmd.AddCommand(secretsCmd)
 }
 
 func Execute() error {
@@ -73,5 +78,14 @@ func GetGlobalOptions() GlobalOptions {
 		Region:       region,
 		NoColor:      noColor,
 		NoSSM:        noSSM,
+	}
+}
+
+func printManifestError(err error, useColor bool) {
+	var manifestErr *config.ManifestError
+	if errors.As(err, &manifestErr) {
+		manifestErr.Print(os.Stderr, useColor)
+	} else {
+		log.Error("failed to load manifest", "error", err)
 	}
 }

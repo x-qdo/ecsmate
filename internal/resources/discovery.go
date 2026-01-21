@@ -9,9 +9,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
-	awsclient "github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/log"
+	awsclient "github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 // Ownership tag keys used to identify resources managed by ecsmate
@@ -197,7 +197,7 @@ func (b *ResourceBuilder) buildServiceDiscovery(ctx context.Context, manifest *c
 				continue
 			}
 
-			if !isOwnedByEcsmate(tags) {
+			if !matchesManifestTags(tags, manifest.Tags) {
 				continue
 			}
 
@@ -279,7 +279,7 @@ func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Ma
 				if arn == "" || desiredRegistryArns[arn] {
 					continue
 				}
-				b.addOrphanServiceDiscovery(ctx, state, arn, name)
+				b.addOrphanServiceDiscovery(ctx, state, arn, name, manifest.Tags)
 			}
 		}
 	}
@@ -287,7 +287,7 @@ func (b *ResourceBuilder) buildServices(ctx context.Context, manifest *config.Ma
 	return nil
 }
 
-func (b *ResourceBuilder) addOrphanServiceDiscovery(ctx context.Context, state *DesiredState, arn, serviceName string) {
+func (b *ResourceBuilder) addOrphanServiceDiscovery(ctx context.Context, state *DesiredState, arn, serviceName string, manifestTags map[string]string) {
 	if b.sdManager == nil || arn == "" {
 		return
 	}
@@ -303,7 +303,7 @@ func (b *ResourceBuilder) addOrphanServiceDiscovery(ctx context.Context, state *
 		return
 	}
 
-	if !isOwnedByEcsmate(tags) {
+	if !matchesManifestTags(tags, manifestTags) {
 		return
 	}
 
@@ -466,9 +466,8 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 		}
 	}
 
-	// Build DELETE resources for orphaned target groups (from orphaned listener rules)
-	// Only mark as orphaned if the target group belongs to this manifest (by naming pattern or tags)
-	var orphanedTgArns []string
+	// Collect candidate orphan TG ARNs (rules not in manifest, TGs matching naming pattern)
+	var candidateOrphanTgArns []string
 	for i := range existingRules {
 		rule := &existingRules[i]
 		ruleArn := extractRuleArn(rule)
@@ -482,7 +481,6 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 
 		tgName := extractTargetGroupName(tgArn)
 
-		// Check if TG belongs to this manifest by naming convention: {manifestName}-r{priority}
 		if !isTargetGroupOwnedByManifest(tgName, manifest.Name) {
 			log.Debug("skipping orphan detection for TG not owned by manifest",
 				"tgName", tgName, "manifestName", manifest.Name)
@@ -490,31 +488,34 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 		}
 
 		usedTargetGroupArns[tgArn] = true
-		orphanedTgArns = append(orphanedTgArns, tgArn)
+		candidateOrphanTgArns = append(candidateOrphanTgArns, tgArn)
 	}
 
-	// Fetch tags for orphaned TGs to verify ownership via tags
+	// Fetch tags for candidate orphan TGs to verify ownership
 	var orphanTgTags map[string]map[string]string
-	if len(orphanedTgArns) > 0 && b.elbv2Client != nil {
-		tags, err := b.elbv2Client.DescribeTags(ctx, orphanedTgArns)
+	if len(candidateOrphanTgArns) > 0 && b.elbv2Client != nil {
+		tags, err := b.elbv2Client.DescribeTags(ctx, candidateOrphanTgArns)
 		if err != nil {
-			log.Debug("failed to fetch tags for orphaned TGs", "error", err)
+			log.Debug("failed to fetch tags for orphan TGs", "error", err)
 		} else {
 			orphanTgTags = tags
 		}
 	}
 
-	for _, tgArn := range orphanedTgArns {
+	// Build DELETE resources for orphaned target groups (verified by tags)
+	for _, tgArn := range candidateOrphanTgArns {
 		tgName := extractTargetGroupName(tgArn)
 
-		// Double-check ownership via tags if available
-		if orphanTgTags != nil {
-			tags := orphanTgTags[tgArn]
-			if !isOwnedByEcsmate(tags) {
-				log.Debug("skipping orphan TG without ecsmate ownership tag",
-					"tgName", tgName, "tgArn", tgArn)
-				continue
-			}
+		if orphanTgTags == nil {
+			log.Debug("skipping orphan TG - could not fetch tags for ownership verification",
+				"tgName", tgName, "tgArn", tgArn)
+			continue
+		}
+		tags := orphanTgTags[tgArn]
+		if !matchesManifestTags(tags, manifest.Tags) {
+			log.Debug("skipping orphan TG - tags do not match manifest",
+				"tgName", tgName, "tgArn", tgArn, "resourceTags", tags, "manifestTags", manifest.Tags)
+			continue
 		}
 
 		orphanKey := fmt.Sprintf("orphan-%s", tgName)
@@ -524,7 +525,6 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 			Arn:     tgArn,
 			Action:  TargetGroupActionDelete,
 		}
-		// Try to discover current state for better diff display
 		if b.targetGroupManager != nil {
 			if tg, err := b.elbv2Client.DescribeTargetGroupByArn(ctx, tgArn); err == nil && tg != nil {
 				resource.Current = tg
@@ -534,8 +534,8 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 		log.Debug("built orphaned target group for deletion", "name", tgName)
 	}
 
-	// Build listener rules with manifest name for ownership-based orphan detection
-	state.ListenerRules = b.listenerRuleMgr.BuildResourcesWithExisting(listenerArn, manifest.Ingress.Rules, targetGroupArns, existingRules, manifest.Name)
+	// Build listener rules with manifest tags for ownership-based orphan detection
+	state.ListenerRules = b.listenerRuleMgr.BuildResourcesWithExisting(listenerArn, manifest.Ingress.Rules, targetGroupArns, existingRules, manifest.Name, manifest.Tags, orphanTgTags)
 
 	return nil
 }
@@ -644,4 +644,24 @@ func isOwnedByEcsmate(tags map[string]string) bool {
 		return false
 	}
 	return tags[TagKeyManagedBy] == TagValueEcsmate
+}
+
+// matchesManifestTags verifies resource ownership by checking ManagedBy=ecsmate
+// AND all manifest-specific tags (Environment, Tenant, etc.) match.
+func matchesManifestTags(resourceTags, manifestTags map[string]string) bool {
+	if resourceTags == nil {
+		return false
+	}
+
+	if resourceTags[TagKeyManagedBy] != TagValueEcsmate {
+		return false
+	}
+
+	for key, expectedValue := range manifestTags {
+		if actualValue, exists := resourceTags[key]; !exists || actualValue != expectedValue {
+			return false
+		}
+	}
+
+	return true
 }

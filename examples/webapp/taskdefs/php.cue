@@ -22,19 +22,19 @@ _taskdefs: php: {
 			protocol:      "tcp"
 		}]
 
-		environment: [
-			{name: "APP_ENV", value:      _values.environment},
-			{name: "APP_DEBUG", value:    "\(_values.debug)"},
-			{name: "LOG_LEVEL", value:    _values.logLevel},
-			{name: "DB_HOST", value:      _values.database.host},
-			{name: "DB_DATABASE", value:  _values.database.name},
-			{name: "REDIS_HOST", value:   _values.redis.host},
-		]
+		environment: {
+			APP_ENV:     _values.environment
+			APP_DEBUG:   "\(_values.debug)"
+			LOG_LEVEL:   _values.logLevel
+			DB_HOST:     _values.database.host
+			DB_DATABASE: _values.database.name
+			REDIS_HOST:  _values.redis.host
+		}
 
-		secrets: [
-			{name: "DB_PASSWORD", valueFrom:  _values.secrets.dbPassword},
-			{name: "APP_KEY", valueFrom:      _values.secrets.appKey},
-		]
+		secrets: {
+			DB_PASSWORD: _values.secrets.dbPassword
+			APP_KEY:     _values.secrets.appKey
+		}
 
 		logConfiguration: {
 			logDriver: "awslogs"

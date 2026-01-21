@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/resources"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 func TestNewExecutor(t *testing.T) {

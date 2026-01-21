@@ -2,6 +2,149 @@ package resources
 
 import "testing"
 
+func TestMatchesManifestTags(t *testing.T) {
+	tests := []struct {
+		name         string
+		resourceTags map[string]string
+		manifestTags map[string]string
+		expected     bool
+	}{
+		{
+			name: "matches - ManagedBy only, no manifest tags",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: TagValueEcsmate,
+			},
+			manifestTags: nil,
+			expected:     true,
+		},
+		{
+			name: "matches - ManagedBy and matching Environment",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: TagValueEcsmate,
+				"Environment":   "stage",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+			},
+			expected: true,
+		},
+		{
+			name: "matches - ManagedBy and matching Environment and Tenant",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: TagValueEcsmate,
+				"Environment":   "stage",
+				"Tenant":        "cal",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+				"Tenant":      "cal",
+			},
+			expected: true,
+		},
+		{
+			name: "no match - missing ManagedBy",
+			resourceTags: map[string]string{
+				"Environment": "stage",
+				"Tenant":      "cal",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+				"Tenant":      "cal",
+			},
+			expected: false,
+		},
+		{
+			name: "no match - wrong ManagedBy value",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: "terraform",
+				"Environment":   "stage",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+			},
+			expected: false,
+		},
+		{
+			name: "no match - different Environment",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: TagValueEcsmate,
+				"Environment":   "prod",
+				"Tenant":        "cal",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+				"Tenant":      "cal",
+			},
+			expected: false,
+		},
+		{
+			name: "no match - different Tenant",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: TagValueEcsmate,
+				"Environment":   "stage",
+				"Tenant":        "sandbox",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+				"Tenant":      "cal",
+			},
+			expected: false,
+		},
+		{
+			name: "no match - missing manifest tag on resource",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: TagValueEcsmate,
+				"Environment":   "stage",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+				"Tenant":      "cal",
+			},
+			expected: false,
+		},
+		{
+			name:         "no match - nil resource tags",
+			resourceTags: nil,
+			manifestTags: map[string]string{
+				"Environment": "stage",
+			},
+			expected: false,
+		},
+		{
+			name:         "no match - empty resource tags",
+			resourceTags: map[string]string{},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+			},
+			expected: false,
+		},
+		{
+			name: "matches - extra resource tags are ignored",
+			resourceTags: map[string]string{
+				TagKeyManagedBy: TagValueEcsmate,
+				"Environment":   "stage",
+				"Tenant":        "cal",
+				"ExtraTag":      "value",
+			},
+			manifestTags: map[string]string{
+				"Environment": "stage",
+				"Tenant":      "cal",
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchesManifestTags(tt.resourceTags, tt.manifestTags)
+			if result != tt.expected {
+				t.Errorf("matchesManifestTags(%v, %v) = %v, want %v",
+					tt.resourceTags, tt.manifestTags, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestIsTargetGroupOwnedByManifest(t *testing.T) {
 	tests := []struct {
 		name         string

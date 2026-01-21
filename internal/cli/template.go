@@ -9,9 +9,9 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var (
@@ -66,7 +66,7 @@ func runTemplate(cmd *cobra.Command, args []string) error {
 
 	manifest, err := loadManifest(ctx, &opts, ssmClient)
 	if err != nil {
-		log.Error("failed to load manifest", "error", err)
+		printManifestError(err, !opts.NoColor)
 		os.Exit(ExitCodeError)
 	}
 

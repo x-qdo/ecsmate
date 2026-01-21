@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -9,9 +10,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 
-	awsclient "github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/log"
+	awsclient "github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type ScheduledTaskAction string
@@ -89,6 +90,11 @@ func (r *ScheduledTaskResource) ToCreateInput(groupName string) (*scheduler.Crea
 		RoleArn:       aws.String(r.RoleArn),
 		EcsParameters: ecsParams,
 	}
+
+	if inputJSON := r.buildOverridesInput(); inputJSON != "" {
+		target.Input = aws.String(inputJSON)
+	}
+
 	if task.DeadLetterConfig != nil && task.DeadLetterConfig.Arn != "" {
 		target.DeadLetterConfig = &types.DeadLetterConfig{
 			Arn: aws.String(task.DeadLetterConfig.Arn),
@@ -159,6 +165,11 @@ func (r *ScheduledTaskResource) ToUpdateInput(groupName string) (*scheduler.Upda
 		RoleArn:       aws.String(r.RoleArn),
 		EcsParameters: ecsParams,
 	}
+
+	if inputJSON := r.buildOverridesInput(); inputJSON != "" {
+		target.Input = aws.String(inputJSON)
+	}
+
 	if task.DeadLetterConfig != nil && task.DeadLetterConfig.Arn != "" {
 		target.DeadLetterConfig = &types.DeadLetterConfig{
 			Arn: aws.String(task.DeadLetterConfig.Arn),
@@ -359,4 +370,72 @@ func getRegionFromCluster(cluster string) string {
 		}
 	}
 	return "us-east-1"
+}
+
+type ecsTaskOverrideInput struct {
+	ContainerOverrides []ecsContainerOverride `json:"containerOverrides,omitempty"`
+	CPU                string                 `json:"cpu,omitempty"`
+	Memory             string                 `json:"memory,omitempty"`
+	TaskRoleArn        string                 `json:"taskRoleArn,omitempty"`
+	ExecutionRoleArn   string                 `json:"executionRoleArn,omitempty"`
+}
+
+type ecsContainerOverride struct {
+	Name        string           `json:"name"`
+	Command     []string         `json:"command,omitempty"`
+	CPU         *int             `json:"cpu,omitempty"`
+	Memory      *int             `json:"memory,omitempty"`
+	Environment []ecsEnvKeyValue `json:"environment,omitempty"`
+}
+
+type ecsEnvKeyValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+func (r *ScheduledTaskResource) buildOverridesInput() string {
+	if r.Desired == nil || r.Desired.Overrides == nil {
+		return ""
+	}
+
+	overrides := r.Desired.Overrides
+	if overrides.CPU == "" && overrides.Memory == "" && overrides.TaskRoleArn == "" &&
+		overrides.ExecutionRoleArn == "" && len(overrides.ContainerOverrides) == 0 {
+		return ""
+	}
+
+	input := ecsTaskOverrideInput{
+		CPU:              overrides.CPU,
+		Memory:           overrides.Memory,
+		TaskRoleArn:      overrides.TaskRoleArn,
+		ExecutionRoleArn: overrides.ExecutionRoleArn,
+	}
+
+	for _, co := range overrides.ContainerOverrides {
+		override := ecsContainerOverride{
+			Name:    co.Name,
+			Command: co.Command,
+		}
+		if co.CPU > 0 {
+			override.CPU = &co.CPU
+		}
+		if co.Memory > 0 {
+			override.Memory = &co.Memory
+		}
+		for _, env := range co.Environment {
+			override.Environment = append(override.Environment, ecsEnvKeyValue{
+				Name:  env.Name,
+				Value: env.Value,
+			})
+		}
+		input.ContainerOverrides = append(input.ContainerOverrides, override)
+	}
+
+	data, err := json.Marshal(input)
+	if err != nil {
+		log.Debug("failed to marshal overrides input", "error", err)
+		return ""
+	}
+
+	return string(data)
 }

@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var ssmRefPattern = regexp.MustCompile(`\{\{ssm:([^}]+)\}\}`)

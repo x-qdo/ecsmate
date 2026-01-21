@@ -21,10 +21,10 @@ _taskdefs: nginx: {
 			protocol:      "tcp"
 		}]
 
-		environment: [
-			{name: "UPSTREAM_HOST", value: "localhost"},
-			{name: "UPSTREAM_PORT", value: "9000"},
-		]
+		environment: {
+			UPSTREAM_HOST: "localhost"
+			UPSTREAM_PORT: "9000"
+		}
 
 		logConfiguration: {
 			logDriver: "awslogs"

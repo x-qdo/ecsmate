@@ -1,12 +1,13 @@
 package resources
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 
-	"github.com/qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/config"
 )
 
 func TestScheduledTaskResource_ScheduleExpression_Cron(t *testing.T) {
@@ -331,5 +332,154 @@ func TestScheduledTaskResource_NetworkConfiguration(t *testing.T) {
 	}
 	if awsVpc.AssignPublicIp != types.AssignPublicIpEnabled {
 		t.Errorf("expected AssignPublicIp ENABLED, got %s", awsVpc.AssignPublicIp)
+	}
+}
+
+func TestScheduledTaskResource_ContainerOverrides(t *testing.T) {
+	resource := &ScheduledTaskResource{
+		Name: "cron-task",
+		Desired: &config.ScheduledTask{
+			TaskDefinition:     "cron",
+			Cluster:            "test-cluster",
+			TaskCount:          1,
+			ScheduleType:       "cron",
+			ScheduleExpression: "0 * * * ? *",
+			Overrides: &config.TaskOverrides{
+				ContainerOverrides: []config.ContainerOverride{{
+					Name:    "cron",
+					Command: []string{"php", "artisan", "queue:work", "--queue=high"},
+				}},
+			},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/cron:1",
+		RoleArn:           "arn:aws:iam::123456789:role/scheduler-role",
+	}
+
+	input, err := resource.ToCreateInput("default")
+	if err != nil {
+		t.Fatalf("failed to create input: %v", err)
+	}
+
+	if input.Target.Input == nil {
+		t.Fatal("expected target input with overrides")
+	}
+
+	inputJSON := aws.ToString(input.Target.Input)
+	if inputJSON == "" {
+		t.Fatal("expected non-empty input JSON")
+	}
+
+	expectedSubstrings := []string{
+		`"containerOverrides"`,
+		`"name":"cron"`,
+		`"command":["php","artisan","queue:work","--queue=high"]`,
+	}
+	for _, substr := range expectedSubstrings {
+		if !strings.Contains(inputJSON, substr) {
+			t.Errorf("expected input to contain %q, got: %s", substr, inputJSON)
+		}
+	}
+}
+
+func TestScheduledTaskResource_ContainerOverridesWithEnv(t *testing.T) {
+	resource := &ScheduledTaskResource{
+		Name: "cron-task",
+		Desired: &config.ScheduledTask{
+			TaskDefinition:     "cron",
+			Cluster:            "test-cluster",
+			TaskCount:          1,
+			ScheduleType:       "cron",
+			ScheduleExpression: "0 * * * ? *",
+			Overrides: &config.TaskOverrides{
+				CPU:    "512",
+				Memory: "1024",
+				ContainerOverrides: []config.ContainerOverride{{
+					Name:    "worker",
+					Command: []string{"php", "artisan", "process"},
+					CPU:     256,
+					Memory:  512,
+					Environment: []config.KeyValuePair{
+						{Name: "QUEUE_NAME", Value: "high-priority"},
+						{Name: "BATCH_SIZE", Value: "100"},
+					},
+				}},
+			},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/cron:1",
+		RoleArn:           "arn:aws:iam::123456789:role/scheduler-role",
+	}
+
+	input, err := resource.ToCreateInput("default")
+	if err != nil {
+		t.Fatalf("failed to create input: %v", err)
+	}
+
+	if input.Target.Input == nil {
+		t.Fatal("expected target input with overrides")
+	}
+
+	inputJSON := aws.ToString(input.Target.Input)
+
+	expectedSubstrings := []string{
+		`"cpu":"512"`,
+		`"memory":"1024"`,
+		`"name":"worker"`,
+		`"cpu":256`,
+		`"memory":512`,
+		`"environment":[`,
+		`"name":"QUEUE_NAME"`,
+		`"value":"high-priority"`,
+	}
+	for _, substr := range expectedSubstrings {
+		if !strings.Contains(inputJSON, substr) {
+			t.Errorf("expected input to contain %q, got: %s", substr, inputJSON)
+		}
+	}
+}
+
+func TestScheduledTaskResource_NoOverrides(t *testing.T) {
+	resource := &ScheduledTaskResource{
+		Name: "simple-task",
+		Desired: &config.ScheduledTask{
+			TaskDefinition:     "cron",
+			Cluster:            "test-cluster",
+			TaskCount:          1,
+			ScheduleType:       "rate",
+			ScheduleExpression: "1 hour",
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/cron:1",
+		RoleArn:           "arn:aws:iam::123456789:role/scheduler-role",
+	}
+
+	input, err := resource.ToCreateInput("default")
+	if err != nil {
+		t.Fatalf("failed to create input: %v", err)
+	}
+
+	if input.Target.Input != nil {
+		t.Errorf("expected no target input for task without overrides, got: %s", aws.ToString(input.Target.Input))
+	}
+}
+
+func TestBuildOverridesInput_ListConcat(t *testing.T) {
+	resource := &ScheduledTaskResource{
+		Desired: &config.ScheduledTask{
+			Overrides: &config.TaskOverrides{
+				ContainerOverrides: []config.ContainerOverride{{
+					Name:    "command",
+					Command: []string{"php", "/var/www/ucb/composer_projects/console/bin/console", "artisan", "queue:work"},
+				}},
+			},
+		},
+	}
+
+	inputJSON := resource.buildOverridesInput()
+	if inputJSON == "" {
+		t.Fatal("expected non-empty input JSON")
+	}
+
+	expectedCommand := `"command":["php","/var/www/ucb/composer_projects/console/bin/console","artisan","queue:work"]`
+	if !strings.Contains(inputJSON, expectedCommand) {
+		t.Errorf("expected input to contain %q, got: %s", expectedCommand, inputJSON)
 	}
 }

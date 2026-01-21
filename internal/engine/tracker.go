@@ -11,7 +11,7 @@ import (
 	"github.com/fatih/color"
 	"golang.org/x/term"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type TaskStatus string
