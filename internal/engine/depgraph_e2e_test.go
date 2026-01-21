@@ -3,9 +3,9 @@ package engine
 import (
 	"testing"
 
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/diff"
-	"github.com/qdo/ecsmate/internal/resources"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/diff"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 // Test: Delete ingress rule cascades to target group and listener rule

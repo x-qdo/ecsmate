@@ -10,7 +10,7 @@ import (
 	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/cue/load"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 // ValuesLoader handles loading and merging of CUE value files

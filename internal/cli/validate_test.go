@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/config"
 )
 
 func TestValidateManifestContent_Valid(t *testing.T) {

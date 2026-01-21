@@ -13,8 +13,8 @@ import (
 	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/cue/load"
 
-	"github.com/qdo/ecsmate/internal/log"
-	schema "github.com/qdo/ecsmate/pkg/cue"
+	"github.com/x-qdo/ecsmate/internal/log"
+	schema "github.com/x-qdo/ecsmate/pkg/cue"
 )
 
 // Schema files are loaded from pkg/cue at runtime
@@ -45,7 +45,7 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	// Use virtual module root if no real one found
 	if moduleRoot == "" || modulePath == "" {
 		moduleRoot = "/virtual/ecsmate"
-		modulePath = "github.com/qdo/ecsmate"
+		modulePath = "github.com/x-qdo/ecsmate"
 	}
 	cfg.ModuleRoot = moduleRoot
 	cfg.Module = modulePath
@@ -141,7 +141,7 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 
 	// Check for schema import (strict mode)
 	if !HasSchemaImport(inst) {
-		return cue.Value{}, fmt.Errorf("strict mode: manifest must import schema package\n\nAdd to your CUE file:\n  import \"github.com/qdo/ecsmate/pkg/cue:schema\"\n  manifest: schema.#Manifest & { ... }")
+		return cue.Value{}, fmt.Errorf("strict mode: manifest must import schema package\n\nAdd to your CUE file:\n  import \"github.com/x-qdo/ecsmate/pkg/cue:schema\"\n  manifest: schema.#Manifest & { ... }")
 	}
 
 	// Validate against schema
@@ -424,7 +424,7 @@ func ExtractStringSlice(v cue.Value, path string) ([]string, error) {
 // HasSchemaImport checks if the CUE instance imports the schema package
 func HasSchemaImport(inst *build.Instance) bool {
 	for _, imp := range inst.Imports {
-		if imp.ImportPath == "github.com/qdo/ecsmate/pkg/cue:schema" {
+		if imp.ImportPath == "github.com/x-qdo/ecsmate/pkg/cue:schema" {
 			return true
 		}
 	}
@@ -451,7 +451,7 @@ func buildSchemaOverlay(moduleRoot string) map[string]load.Source {
 	overlay := make(map[string]load.Source)
 
 	// Add module.cue to establish module identity
-	moduleCue := `module: "github.com/qdo/ecsmate"
+	moduleCue := `module: "github.com/x-qdo/ecsmate"
 language: { version: "v0.11.0" }`
 	overlay[filepath.Join(moduleRoot, "cue.mod", "module.cue")] = load.FromString(moduleCue)
 

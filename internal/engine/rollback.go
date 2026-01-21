@@ -8,8 +8,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
-	awsclient "github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/log"
+	awsclient "github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 // RollbackManager handles service rollbacks
@@ -24,12 +24,12 @@ func NewRollbackManager(ecsClient *awsclient.ECSClient) *RollbackManager {
 
 // RollbackResult contains the result of a rollback operation
 type RollbackResult struct {
-	ServiceName       string
-	PreviousTaskDef   string
-	TargetTaskDef     string
-	TargetRevision    int
-	Success           bool
-	Message           string
+	ServiceName     string
+	PreviousTaskDef string
+	TargetTaskDef   string
+	TargetRevision  int
+	Success         bool
+	Message         string
 }
 
 // Rollback rolls back a service to a specific task definition revision

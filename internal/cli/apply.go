@@ -10,12 +10,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/diff"
-	"github.com/qdo/ecsmate/internal/engine"
-	"github.com/qdo/ecsmate/internal/log"
-	"github.com/qdo/ecsmate/internal/resources"
+	"github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/diff"
+	"github.com/x-qdo/ecsmate/internal/engine"
+	"github.com/x-qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 var (

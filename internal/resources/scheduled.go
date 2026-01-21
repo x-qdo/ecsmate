@@ -9,9 +9,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 
-	awsclient "github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/log"
+	awsclient "github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type ScheduledTaskAction string

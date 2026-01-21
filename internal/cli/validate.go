@@ -7,8 +7,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var validateCmd = &cobra.Command{

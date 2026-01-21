@@ -6,7 +6,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
-	"github.com/qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/config"
 )
 
 func TestListenerRuleResource_DetermineAction_NoChange(t *testing.T) {

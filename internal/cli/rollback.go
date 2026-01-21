@@ -8,9 +8,9 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	awsclient "github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/engine"
-	"github.com/qdo/ecsmate/internal/log"
+	awsclient "github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/engine"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var (

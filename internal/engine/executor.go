@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/log"
-	"github.com/qdo/ecsmate/internal/resources"
+	"github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 type Executor struct {

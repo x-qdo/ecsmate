@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/aws"
 )
 
 type Envelope struct {

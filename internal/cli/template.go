@@ -9,9 +9,9 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var (

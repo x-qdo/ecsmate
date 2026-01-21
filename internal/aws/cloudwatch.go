@@ -10,7 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type CloudWatchLogsClient struct {

@@ -9,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type KMSClient struct {

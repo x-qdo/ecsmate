@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/diff"
-	"github.com/qdo/ecsmate/internal/resources"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/diff"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 type Plan struct {

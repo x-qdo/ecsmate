@@ -7,9 +7,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
-	"github.com/qdo/ecsmate/internal/config"
-	"github.com/qdo/ecsmate/internal/diff"
-	"github.com/qdo/ecsmate/internal/resources"
+	"github.com/x-qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/diff"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 func TestPlanner_GeneratePlan_Empty(t *testing.T) {

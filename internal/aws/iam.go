@@ -11,7 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type IAMClient struct {
@@ -35,19 +35,19 @@ func NewIAMClient(ctx context.Context, region string) (*IAMClient, error) {
 }
 
 const (
-	EventBridgeSchedulerRoleName = "ecsmate-eventbridge-scheduler-role"
+	EventBridgeSchedulerRoleName   = "ecsmate-eventbridge-scheduler-role"
 	EventBridgeSchedulerPolicyName = "ecsmate-eventbridge-scheduler-policy"
 )
 
 type AssumeRolePolicyDocument struct {
-	Version   string                   `json:"Version"`
-	Statement []AssumeRoleStatement    `json:"Statement"`
+	Version   string                `json:"Version"`
+	Statement []AssumeRoleStatement `json:"Statement"`
 }
 
 type AssumeRoleStatement struct {
-	Effect    string                 `json:"Effect"`
-	Principal map[string]string      `json:"Principal"`
-	Action    string                 `json:"Action"`
+	Effect    string            `json:"Effect"`
+	Principal map[string]string `json:"Principal"`
+	Action    string            `json:"Action"`
 }
 
 type PolicyDocument struct {
@@ -169,4 +169,3 @@ func (c *IAMClient) attachECSPolicy(ctx context.Context, roleName string) error 
 	log.Debug("attached ECS policy to role", "role", roleName, "policy", EventBridgeSchedulerPolicyName)
 	return nil
 }
-

@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/qdo/ecsmate/internal/cli"
+	"github.com/x-qdo/ecsmate/internal/cli"
 )
 
 func main() {

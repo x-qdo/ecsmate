@@ -56,7 +56,7 @@ CUE Files → CUELoader → Manifest → ResourceBuilder → DesiredState
 
 ### CUE Schema
 - Schema in `pkg/cue/` embedded via `embed.go`
-- Users import `github.com/qdo/ecsmate/pkg/cue:schema`
+- Users import `github.com/x-qdo/ecsmate/pkg/cue:schema`
 - Use `type | *"default"` for `--set` overridable values (NOT concrete values)
 
 ### Resource Managers

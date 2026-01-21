@@ -1,4 +1,4 @@
-module github.com/qdo/ecsmate
+module github.com/x-qdo/ecsmate
 
 go 1.25.0
 

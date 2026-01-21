@@ -6,7 +6,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 
-	"github.com/qdo/ecsmate/internal/config"
+	"github.com/x-qdo/ecsmate/internal/config"
 )
 
 func TestTaskDefResource_ToRegisterInput(t *testing.T) {
@@ -14,15 +14,15 @@ func TestTaskDefResource_ToRegisterInput(t *testing.T) {
 		Name: "php",
 		Type: "managed",
 		Desired: &config.TaskDefinition{
-			Name:                     "php",
-			Type:                     "managed",
-			Family:                   "myapp-php",
-			CPU:                      "256",
-			Memory:                   "512",
-			NetworkMode:              "awsvpc",
-			ExecutionRoleArn:         "arn:aws:iam::123456789:role/ecsTaskExecutionRole",
-			TaskRoleArn:              "arn:aws:iam::123456789:role/ecsTaskRole",
-			RequiresCompatibilities:  []string{"FARGATE"},
+			Name:                    "php",
+			Type:                    "managed",
+			Family:                  "myapp-php",
+			CPU:                     "256",
+			Memory:                  "512",
+			NetworkMode:             "awsvpc",
+			ExecutionRoleArn:        "arn:aws:iam::123456789:role/ecsTaskExecutionRole",
+			TaskRoleArn:             "arn:aws:iam::123456789:role/ecsTaskRole",
+			RequiresCompatibilities: []string{"FARGATE"},
 			ContainerDefinitions: []config.ContainerDefinition{
 				{
 					Name:      "php",
@@ -333,12 +333,12 @@ func TestApplyOverrides(t *testing.T) {
 	manager := &TaskDefManager{}
 
 	base := &types.TaskDefinition{
-		Family:      aws.String("base-family"),
-		Cpu:         aws.String("256"),
-		Memory:      aws.String("512"),
-		NetworkMode: types.NetworkModeAwsvpc,
-		ExecutionRoleArn: aws.String("arn:aws:iam::123:role/base-exec"),
-		TaskRoleArn:      aws.String("arn:aws:iam::123:role/base-task"),
+		Family:                  aws.String("base-family"),
+		Cpu:                     aws.String("256"),
+		Memory:                  aws.String("512"),
+		NetworkMode:             types.NetworkModeAwsvpc,
+		ExecutionRoleArn:        aws.String("arn:aws:iam::123:role/base-exec"),
+		TaskRoleArn:             aws.String("arn:aws:iam::123:role/base-task"),
 		RequiresCompatibilities: []types.Compatibility{types.CompatibilityFargate},
 		ContainerDefinitions: []types.ContainerDefinition{
 			{
@@ -410,12 +410,12 @@ func TestApplyOverrides(t *testing.T) {
 
 func TestConvertECSContainerDefinition(t *testing.T) {
 	ecsCD := types.ContainerDefinition{
-		Name:      aws.String("php"),
-		Image:     aws.String("php:8.2"),
-		Cpu:       512,
-		Memory:    aws.Int32(1024),
-		Essential: aws.Bool(true),
-		Command:   []string{"php-fpm"},
+		Name:             aws.String("php"),
+		Image:            aws.String("php:8.2"),
+		Cpu:              512,
+		Memory:           aws.Int32(1024),
+		Essential:        aws.Bool(true),
+		Command:          []string{"php-fpm"},
 		WorkingDirectory: aws.String("/app"),
 		Environment: []types.KeyValuePair{
 			{Name: aws.String("APP_ENV"), Value: aws.String("production")},

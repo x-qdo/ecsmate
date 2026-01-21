@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/qdo/ecsmate/internal/aws"
-	"github.com/qdo/ecsmate/internal/log"
-	"github.com/qdo/ecsmate/internal/secrets"
+	"github.com/x-qdo/ecsmate/internal/aws"
+	"github.com/x-qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/secrets"
 )
 
 type ManagedSecrets struct {

@@ -6,7 +6,7 @@ import (
 
 	"cuelang.org/go/cue"
 
-	"github.com/qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 type Manifest struct {

@@ -34,7 +34,7 @@ manifest: {
 		{
 			name: "valid manifest with schema",
 			cueFile: `package test
-import "github.com/qdo/ecsmate/pkg/cue:schema"
+import "github.com/x-qdo/ecsmate/pkg/cue:schema"
 manifest: schema.#Manifest & {
 	name: "test"
 }`,
