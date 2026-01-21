@@ -12,7 +12,9 @@ Minimal IAM policies following the principle of least privilege.
 | CloudWatch Logs | Log group management |
 | EventBridge Scheduler | Scheduled tasks |
 | IAM | Role management for scheduler |
-| SSM | Parameter resolution |
+| SSM | Parameter resolution and managed secrets |
+| KMS | Envelope encryption for managed secrets |
+| STS | Account ID lookup for ARN construction |
 | Service Discovery | Cloud Map integration |
 
 ## Full Access Policy
@@ -119,8 +121,28 @@ Required for all ecsmate operations (`diff`, `apply`, `status`, `rollback`):
       "Effect": "Allow",
       "Action": [
         "ssm:GetParameter",
-        "ssm:GetParameters"
+        "ssm:GetParameters",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:DescribeParameters",
+        "ssm:ListTagsForResource",
+        "ssm:AddTagsToResource"
       ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KMS",
+      "Effect": "Allow",
+      "Action": [
+        "kms:GenerateDataKey",
+        "kms:Decrypt"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "STS",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
       "Resource": "*"
     },
     {
@@ -225,8 +247,22 @@ For `diff`, `status`, and `validate` commands only:
       "Effect": "Allow",
       "Action": [
         "ssm:GetParameter",
-        "ssm:GetParameters"
+        "ssm:GetParameters",
+        "ssm:DescribeParameters",
+        "ssm:ListTagsForResource"
       ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KMSRead",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "*"
+    },
+    {
+      "Sid": "STS",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
       "Resource": "*"
     },
     {
@@ -245,7 +281,12 @@ For `diff`, `status`, and `validate` commands only:
 
 ## Resource-Scoped Policy (Production)
 
-Replace `REGION`, `ACCOUNT_ID`, `CLUSTER_NAME` with actual values:
+Replace placeholders with actual values:
+- `REGION` - AWS region (e.g., `us-east-1`)
+- `ACCOUNT_ID` - AWS account ID
+- `CLUSTER_NAME` - ECS cluster name
+- `SECRETS_PREFIX` - SSM parameter prefix for managed secrets (e.g., `/myapp/prod`)
+- `KMS_KEY_ID` - KMS key ID for secrets encryption
 
 ```json
 {
@@ -361,13 +402,40 @@ Replace `REGION`, `ACCOUNT_ID`, `CLUSTER_NAME` with actual values:
       "Resource": "arn:aws:iam::ACCOUNT_ID:role/ecsmate-*"
     },
     {
-      "Sid": "SSM",
+      "Sid": "SSMRead",
       "Effect": "Allow",
       "Action": [
         "ssm:GetParameter",
-        "ssm:GetParameters"
+        "ssm:GetParameters",
+        "ssm:DescribeParameters",
+        "ssm:ListTagsForResource"
       ],
       "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/*"
+    },
+    {
+      "Sid": "SSMWrite",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource"
+      ],
+      "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/SECRETS_PREFIX/*"
+    },
+    {
+      "Sid": "KMS",
+      "Effect": "Allow",
+      "Action": [
+        "kms:GenerateDataKey",
+        "kms:Decrypt"
+      ],
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/KMS_KEY_ID"
+    },
+    {
+      "Sid": "STS",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
     },
     {
       "Sid": "ServiceDiscovery",
@@ -409,3 +477,6 @@ Replace `REGION`, `ACCOUNT_ID`, `CLUSTER_NAME` with actual values:
 - `application-autoscaling` permissions cannot be resource-scoped (AWS limitation)
 - `iam:PassRole` is required for ECS task execution roles and EventBridge Scheduler
 - IAM role creation is scoped to `ecsmate-*` prefix (roles created by ecsmate for scheduler)
+- KMS permissions are only needed when using managed secrets
+- SSM write permissions can be scoped to the secrets prefix (e.g., `/myapp/prod/*`)
+- `sts:GetCallerIdentity` is needed to construct SSM parameter ARNs for task definitions
