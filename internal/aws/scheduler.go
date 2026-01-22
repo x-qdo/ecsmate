@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -15,6 +16,10 @@ import (
 type SchedulerClient struct {
 	client *scheduler.Client
 	region string
+}
+
+func (c *SchedulerClient) Region() string {
+	return c.region
 }
 
 func NewSchedulerClient(ctx context.Context, region string) (*SchedulerClient, error) {
@@ -70,17 +75,17 @@ func (c *SchedulerClient) ListSchedules(ctx context.Context, groupName, namePref
 	return schedules, nil
 }
 
-func (c *SchedulerClient) CreateSchedule(ctx context.Context, input *scheduler.CreateScheduleInput) error {
+func (c *SchedulerClient) CreateSchedule(ctx context.Context, input *scheduler.CreateScheduleInput) (string, error) {
 	name := aws.ToString(input.Name)
 	log.Debug("creating schedule", "name", name)
 
-	_, err := c.client.CreateSchedule(ctx, input)
+	out, err := c.client.CreateSchedule(ctx, input)
 	if err != nil {
-		return fmt.Errorf("failed to create schedule %s: %w", name, err)
+		return "", fmt.Errorf("failed to create schedule %s: %w", name, err)
 	}
 
 	log.Info("created schedule", "name", name, "expression", aws.ToString(input.ScheduleExpression))
-	return nil
+	return aws.ToString(out.ScheduleArn), nil
 }
 
 func (c *SchedulerClient) UpdateSchedule(ctx context.Context, input *scheduler.UpdateScheduleInput) error {
@@ -161,13 +166,22 @@ func (c *SchedulerClient) UntagResource(ctx context.Context, arn string, keys []
 	return nil
 }
 
-func (c *SchedulerClient) CreateScheduleGroup(ctx context.Context, name string) error {
-	log.Debug("creating schedule group", "name", name)
+func (c *SchedulerClient) EnsureScheduleGroup(ctx context.Context, name string) error {
+	if name == "" || name == "default" {
+		return nil
+	}
+
+	log.Debug("ensuring schedule group exists", "name", name)
 
 	_, err := c.client.CreateScheduleGroup(ctx, &scheduler.CreateScheduleGroupInput{
 		Name: aws.String(name),
 	})
 	if err != nil {
+		var conflict *types.ConflictException
+		if errors.As(err, &conflict) {
+			log.Debug("schedule group already exists", "name", name)
+			return nil
+		}
 		return fmt.Errorf("failed to create schedule group %s: %w", name, err)
 	}
 

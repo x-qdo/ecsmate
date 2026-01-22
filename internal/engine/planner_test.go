@@ -768,6 +768,84 @@ func TestPlan_HasChanges_OnlyNoops(t *testing.T) {
 	}
 }
 
+func TestPlan_HasImageOnlyChanges_CreateScheduledTask(t *testing.T) {
+	plan := &Plan{
+		State: &resources.DesiredState{
+			TaskDefs: map[string]*resources.TaskDefResource{
+				"worker": {Action: resources.TaskDefActionNoop},
+			},
+			ScheduledTasks: map[string]*resources.ScheduledTaskResource{
+				"messenger": {
+					Action:  resources.ScheduledTaskActionCreate,
+					Desired: &config.ScheduledTask{TaskDefinition: "worker"},
+				},
+			},
+		},
+		Entries: []diff.DiffEntry{
+			{Resource: "ScheduledTask", Name: "messenger", Type: diff.DiffTypeCreate},
+		},
+		Summary: diff.DiffSummary{Creates: 1},
+	}
+
+	if plan.HasImageOnlyChanges() {
+		t.Error("CREATE ScheduledTask should not be considered image-only")
+	}
+}
+
+func TestPlan_HasImageOnlyChanges_DeleteService(t *testing.T) {
+	plan := &Plan{
+		State: &resources.DesiredState{
+			TaskDefs: map[string]*resources.TaskDefResource{},
+			Services: map[string]*resources.ServiceResource{
+				"api": {Action: resources.ServiceActionDelete},
+			},
+		},
+		Entries: []diff.DiffEntry{
+			{Resource: "Service", Name: "api", Type: diff.DiffTypeDelete},
+		},
+		Summary: diff.DiffSummary{Deletes: 1},
+	}
+
+	if plan.HasImageOnlyChanges() {
+		t.Error("DELETE Service should not be considered image-only")
+	}
+}
+
+func TestPlan_HasImageOnlyChanges_RecreateTargetGroup(t *testing.T) {
+	plan := &Plan{
+		State: &resources.DesiredState{
+			TaskDefs:     map[string]*resources.TaskDefResource{},
+			TargetGroups: map[string]*resources.TargetGroupResource{},
+		},
+		Entries: []diff.DiffEntry{
+			{Resource: "TargetGroup", Name: "app-r1", Type: diff.DiffTypeRecreate},
+		},
+		Summary: diff.DiffSummary{Recreates: 1},
+	}
+
+	if plan.HasImageOnlyChanges() {
+		t.Error("RECREATE TargetGroup should not be considered image-only")
+	}
+}
+
+func TestPlan_HasImageOnlyChanges_CreateTaskDef(t *testing.T) {
+	plan := &Plan{
+		State: &resources.DesiredState{
+			TaskDefs: map[string]*resources.TaskDefResource{
+				"web": {Action: resources.TaskDefActionCreate},
+			},
+		},
+		Entries: []diff.DiffEntry{
+			{Resource: "TaskDefinition", Name: "web", Type: diff.DiffTypeCreate},
+		},
+		Summary: diff.DiffSummary{Creates: 1},
+	}
+
+	if plan.HasImageOnlyChanges() {
+		t.Error("CREATE TaskDefinition should not be considered image-only")
+	}
+}
+
 // Phase 4: Tests for planner integration with propagation
 
 func TestPlanner_GeneratePlan_PropagatesTargetGroupDelete(t *testing.T) {

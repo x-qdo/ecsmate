@@ -378,8 +378,14 @@ func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *con
 		return nil
 	}
 
+	clusterArns := make(map[string]string)
+	desiredNames := make(map[string]bool)
+
 	for name, task := range manifest.ScheduledTasks {
-		log.Debug("building scheduled task resource", "name", name)
+		scheduleName := ResolveScheduledTaskName(manifest.Name, name)
+		desiredNames[scheduleName] = true
+
+		log.Debug("building scheduled task resource", "name", name, "scheduleName", scheduleName)
 
 		taskDefName := task.TaskDefinition
 		taskDefResource, ok := state.TaskDefs[taskDefName]
@@ -393,7 +399,8 @@ func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *con
 		}
 
 		taskCopy := task
-		resource, err := b.scheduledManager.BuildResource(ctx, name, &taskCopy, taskDefArn, roleArn)
+		taskCopy.Cluster = resolveClusterArn(ctx, b.ecsClient, task.Cluster, clusterArns)
+		resource, err := b.scheduledManager.BuildResource(ctx, scheduleName, &taskCopy, taskDefArn, roleArn)
 		if err != nil {
 			return fmt.Errorf("failed to build scheduled task %s: %w", name, err)
 		}
@@ -401,7 +408,18 @@ func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *con
 		state.ScheduledTasks[name] = resource
 		log.Debug("built scheduled task resource",
 			"name", name,
+			"scheduleName", scheduleName,
 			"action", resource.Action)
+	}
+
+	orphans, err := b.scheduledManager.FindOrphans(ctx, manifest.Name, desiredNames, manifest.Tags)
+	if err != nil {
+		log.Debug("failed to find orphan schedules", "error", err)
+	}
+	for _, orphan := range orphans {
+		key := fmt.Sprintf("orphan-%s", orphan.Name)
+		state.ScheduledTasks[key] = orphan
+		log.Debug("added orphan schedule for deletion", "name", orphan.Name)
 	}
 
 	return nil

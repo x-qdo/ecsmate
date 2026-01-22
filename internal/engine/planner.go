@@ -215,12 +215,14 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 		case resources.ServiceActionCreate:
 			entry.Type = diff.DiffTypeCreate
 			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
+			entry.Hooks = buildHooksList(svc.Desired)
 			plan.Summary.Creates++
 
 		case resources.ServiceActionUpdate:
 			entry.Type = diff.DiffTypeUpdate
 			entry.Current = buildServiceCurrentView(svc)
 			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
+			entry.Hooks = buildHooksList(svc.Desired)
 			plan.Summary.Updates++
 
 		case resources.ServiceActionRecreate:
@@ -228,6 +230,7 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 			entry.Current = buildServiceCurrentView(svc)
 			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
 			entry.RecreateReasons = svc.RecreateReasons
+			entry.Hooks = buildHooksList(svc.Desired)
 			plan.Summary.Recreates++
 
 		case resources.ServiceActionDelete:
@@ -440,6 +443,11 @@ func (plan *Plan) HasImageOnlyChanges() bool {
 	for _, entry := range plan.Entries {
 		if entry.Type == diff.DiffTypeNoop {
 			continue
+		}
+
+		// CREATE, DELETE, RECREATE are never image-only changes
+		if entry.Type != diff.DiffTypeUpdate {
+			return false
 		}
 
 		switch entry.Resource {
@@ -670,18 +678,6 @@ type ServiceView struct {
 	LoadBalancers                 []LoadBalancerView    `json:"loadBalancers,omitempty"`
 	ServiceRegistries             []ServiceRegistryView `json:"serviceRegistries,omitempty"`
 	Deployment                    *DeploymentConfigView `json:"deployment,omitempty"`
-	Hooks                         *HooksView            `json:"hooks,omitempty"`
-}
-
-type HooksView struct {
-	PreHook  *HookView `json:"preHook,omitempty"`
-	PostHook *HookView `json:"postHook,omitempty"`
-}
-
-type HookView struct {
-	TaskDefinition string   `json:"taskDefinition"`
-	Command        []string `json:"command,omitempty"`
-	Timeout        int      `json:"timeout,omitempty"`
 }
 
 type NetworkConfigView struct {
@@ -778,43 +774,35 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 			value := svc.Desired.Deployment.MaximumPercent
 			view.Deployment.MaximumPercent = &value
 		}
-
-		// Add hooks to view
-		if svc.Desired.Hooks != nil {
-			view.Hooks = buildHooksView(svc.Desired.Hooks)
-		}
 	}
 
 	return view
 }
 
-func buildHooksView(hooks *config.Hooks) *HooksView {
-	if hooks == nil {
+func buildHooksList(svc *config.Service) []string {
+	if svc == nil || svc.Hooks == nil {
 		return nil
 	}
-	view := &HooksView{}
-	if hooks.PreHook != nil {
-		view.PreHook = buildHookView(hooks.PreHook)
+
+	var hooks []string
+	if svc.Hooks.PreHook != nil {
+		hooks = append(hooks, formatHookDescription("pre", svc.Hooks.PreHook))
 	}
-	if hooks.PostHook != nil {
-		view.PostHook = buildHookView(hooks.PostHook)
+	if svc.Hooks.PostHook != nil {
+		hooks = append(hooks, formatHookDescription("post", svc.Hooks.PostHook))
 	}
-	return view
+	return hooks
 }
 
-func buildHookView(hook *config.Hook) *HookView {
-	if hook == nil {
-		return nil
-	}
-	view := &HookView{
-		TaskDefinition: hook.TaskDefinition,
-		Timeout:        hook.Timeout,
-	}
-	// Get command from first container override
+func formatHookDescription(hookType string, hook *config.Hook) string {
 	if len(hook.ContainerOverrides) > 0 && len(hook.ContainerOverrides[0].Command) > 0 {
-		view.Command = hook.ContainerOverrides[0].Command
+		cmd := hook.ContainerOverrides[0].Command
+		if len(cmd) > 3 {
+			return fmt.Sprintf("%s-hook: %s ... (%d args)", hookType, strings.Join(cmd[:3], " "), len(cmd))
+		}
+		return fmt.Sprintf("%s-hook: %s", hookType, strings.Join(cmd, " "))
 	}
-	return view
+	return fmt.Sprintf("%s-hook: %s", hookType, hook.TaskDefinition)
 }
 
 func addTaskDefinitionPlaceholder(view *ServiceView, svc *config.Service, taskDefs map[string]*resources.TaskDefResource) {
