@@ -309,3 +309,192 @@ func TestResolveManagedSecrets_MultipleTaskDefinitions(t *testing.T) {
 		t.Errorf("expected worker task secret to be resolved, got %s", workerSecrets[0].ValueFrom)
 	}
 }
+
+func TestValidateSecretReferences_AllValid(t *testing.T) {
+	manifest := &Manifest{
+		TaskDefinitions: map[string]TaskDefinition{
+			"web": {
+				ContainerDefinitions: []ContainerDefinition{
+					{
+						Name: "app",
+						Secrets: []Secret{
+							{Name: "DB_PASS", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/myapp/db_password"},
+							{Name: "API_KEY", ValueFrom: "arn:aws:secretsmanager:us-east-1:123:secret:api"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	errors := manifest.ValidateSecretReferences()
+	if len(errors) != 0 {
+		t.Errorf("expected no errors for valid ARNs, got: %v", errors)
+	}
+}
+
+func TestValidateSecretReferences_BareNameFails(t *testing.T) {
+	manifest := &Manifest{
+		TaskDefinitions: map[string]TaskDefinition{
+			"web": {
+				ContainerDefinitions: []ContainerDefinition{
+					{
+						Name: "app",
+						Secrets: []Secret{
+							{Name: "KREDINOR_CI_PASSWORD", ValueFrom: "KREDINOR_CI_PASSWORD"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	errors := manifest.ValidateSecretReferences()
+	if len(errors) != 1 {
+		t.Errorf("expected 1 error for bare name, got %d: %v", len(errors), errors)
+	}
+}
+
+func TestValidateSecretReferences_MixedValidAndInvalid(t *testing.T) {
+	manifest := &Manifest{
+		TaskDefinitions: map[string]TaskDefinition{
+			"web": {
+				ContainerDefinitions: []ContainerDefinition{
+					{
+						Name: "app",
+						Secrets: []Secret{
+							{Name: "DB_PASS", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/x"},
+							{Name: "BAD_ONE", ValueFrom: "not_an_arn"},
+							{Name: "BAD_TWO", ValueFrom: "/root/level/param"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	errors := manifest.ValidateSecretReferences()
+	if len(errors) != 2 {
+		t.Errorf("expected 2 errors, got %d: %v", len(errors), errors)
+	}
+}
+
+func TestValidateSecretReferences_NoSecrets(t *testing.T) {
+	manifest := &Manifest{
+		TaskDefinitions: map[string]TaskDefinition{
+			"web": {
+				ContainerDefinitions: []ContainerDefinition{
+					{Name: "app"},
+				},
+			},
+		},
+	}
+
+	errors := manifest.ValidateSecretReferences()
+	if len(errors) != 0 {
+		t.Errorf("expected no errors for no secrets, got: %v", errors)
+	}
+}
+
+func TestValidateSecretReferencesOffline_WithManagedSecrets_AllowsBareKeys(t *testing.T) {
+	manifest := &Manifest{
+		Secrets: &SecretsConfig{
+			Managed: &ManagedSecretsConfig{
+				File:      "secrets.enc.yaml",
+				KMSKeyArn: "arn:aws:kms:us-east-1:123:key/abc",
+				SSMPrefix: "/myapp/prod",
+			},
+		},
+		TaskDefinitions: map[string]TaskDefinition{
+			"web": {
+				ContainerDefinitions: []ContainerDefinition{
+					{
+						Name: "app",
+						Secrets: []Secret{
+							{Name: "DB_PASS", ValueFrom: "db_password"},
+							{Name: "API_KEY", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/x"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	errors := manifest.ValidateSecretReferencesOffline()
+	if len(errors) != 0 {
+		t.Errorf("bare key names should be allowed with managed secrets, got: %v", errors)
+	}
+}
+
+func TestValidateSecretReferencesOffline_WithManagedSecrets_FlagsSuspiciousValues(t *testing.T) {
+	manifest := &Manifest{
+		Secrets: &SecretsConfig{
+			Managed: &ManagedSecretsConfig{
+				File:      "secrets.enc.yaml",
+				KMSKeyArn: "arn:aws:kms:us-east-1:123:key/abc",
+				SSMPrefix: "/myapp/prod",
+			},
+		},
+		TaskDefinitions: map[string]TaskDefinition{
+			"web": {
+				ContainerDefinitions: []ContainerDefinition{
+					{
+						Name: "app",
+						Secrets: []Secret{
+							{Name: "BAD", ValueFrom: "/KREDINOR_CI_PASSWORD"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	errors := manifest.ValidateSecretReferencesOffline()
+	if len(errors) != 1 {
+		t.Errorf("path-like value should be flagged with managed secrets, got %d: %v", len(errors), errors)
+	}
+}
+
+func TestValidateSecretReferencesOffline_NoManagedSecrets_RequiresArns(t *testing.T) {
+	manifest := &Manifest{
+		TaskDefinitions: map[string]TaskDefinition{
+			"web": {
+				ContainerDefinitions: []ContainerDefinition{
+					{
+						Name: "app",
+						Secrets: []Secret{
+							{Name: "GOOD", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/x"},
+							{Name: "BAD", ValueFrom: "KREDINOR_CI_PASSWORD"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	errors := manifest.ValidateSecretReferencesOffline()
+	if len(errors) != 1 {
+		t.Errorf("bare name without managed secrets should be an error, got %d: %v", len(errors), errors)
+	}
+}
+
+func TestIsBareKeyName(t *testing.T) {
+	tests := []struct {
+		value    string
+		expected bool
+	}{
+		{"db_password", true},
+		{"API_KEY", true},
+		{"my-secret.key", true},
+		{"/path/to/param", false},
+		{"arn:aws:ssm:us-east-1:123:parameter/x", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		result := isBareKeyName(tt.value)
+		if result != tt.expected {
+			t.Errorf("isBareKeyName(%q) = %v, want %v", tt.value, result, tt.expected)
+		}
+	}
+}

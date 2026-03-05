@@ -189,6 +189,7 @@ func validateManifestContent(manifest *config.Manifest) []string {
 			errors = append(errors, fmt.Sprintf("scheduled task '%s': schedule.expression is required", name))
 		}
 	}
+	errors = append(errors, manifest.ValidateSecretReferencesOffline()...)
 
 	return errors
 }

@@ -79,6 +79,14 @@ func runApply(cmd *cobra.Command, args []string) error {
 			os.Exit(ExitCodeError)
 		}
 		manifest.ResolveManagedSecrets(managedSecrets)
+
+		// Validate that all secret references resolved to valid ARNs
+		if secretErrors := manifest.ValidateSecretReferences(); len(secretErrors) > 0 {
+			for _, e := range secretErrors {
+				log.Error("invalid secret reference", "error", e)
+			}
+			os.Exit(ExitCodeError)
+		}
 	}
 
 	clients, err := initAWSClients(ctx, &opts, manifest)
