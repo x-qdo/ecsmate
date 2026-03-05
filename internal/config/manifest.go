@@ -1258,6 +1258,93 @@ func (m *Manifest) ResolveManagedSecrets(managedSecrets *ManagedSecrets) {
 	}
 }
 
+// ValidateSecretReferences checks that all container secret ValueFrom values are
+// valid ARNs. Call this after ResolveManagedSecrets to catch unresolved or
+// misconfigured secret references before they reach ECS (where bare strings
+// are silently interpreted as SSM parameter names, usually causing AccessDenied).
+func (m *Manifest) ValidateSecretReferences() []string {
+	var errors []string
+
+	for tdName, td := range m.TaskDefinitions {
+		for _, cd := range td.ContainerDefinitions {
+			for _, secret := range cd.Secrets {
+				if !isValidSecretArn(secret.ValueFrom) {
+					errors = append(errors, fmt.Sprintf(
+						"task definition '%s', container '%s': secret '%s' has invalid valueFrom %q — "+
+							"expected an ARN (arn:aws:ssm:... or arn:aws:secretsmanager:...) or a managed secret key; "+
+							"bare values are passed to ECS as SSM parameter names which will likely fail with AccessDenied",
+						tdName, cd.Name, secret.Name, secret.ValueFrom,
+					))
+				}
+			}
+		}
+	}
+
+	return errors
+}
+
+// ValidateSecretReferencesOffline checks secret references without managed secrets
+// resolution. If managed secrets are configured, bare key names are allowed
+// (they'll be resolved at diff/apply time). Without managed secrets, all values
+// must be ARNs.
+func (m *Manifest) ValidateSecretReferencesOffline() []string {
+	hasManagedSecrets := m.Secrets != nil && m.Secrets.Managed != nil
+	var errors []string
+
+	for tdName, td := range m.TaskDefinitions {
+		for _, cd := range td.ContainerDefinitions {
+			for _, secret := range cd.Secrets {
+				if isValidSecretArn(secret.ValueFrom) {
+					continue
+				}
+
+				// With managed secrets, bare key names (no slashes, no colons) are
+				// assumed to be managed secret keys that will be resolved later.
+				if hasManagedSecrets && isBareKeyName(secret.ValueFrom) {
+					continue
+				}
+
+				if hasManagedSecrets {
+					errors = append(errors, fmt.Sprintf(
+						"task definition '%s', container '%s': secret '%s' has suspicious valueFrom %q — "+
+							"not an ARN and doesn't look like a managed secret key name (contains '/' or ':')",
+						tdName, cd.Name, secret.Name, secret.ValueFrom,
+					))
+				} else {
+					errors = append(errors, fmt.Sprintf(
+						"task definition '%s', container '%s': secret '%s' has invalid valueFrom %q — "+
+							"expected an ARN (arn:aws:ssm:... or arn:aws:secretsmanager:...); "+
+							"configure secrets.managed to use key-based references",
+						tdName, cd.Name, secret.Name, secret.ValueFrom,
+					))
+				}
+			}
+		}
+	}
+
+	return errors
+}
+
+// isValidSecretArn checks if a value is a valid AWS ARN for SSM or Secrets Manager.
+func isValidSecretArn(value string) bool {
+	return strings.HasPrefix(value, "arn:aws:ssm:") ||
+		strings.HasPrefix(value, "arn:aws:secretsmanager:")
+}
+
+// isBareKeyName checks if a value looks like a simple secret key name
+// (alphanumeric, underscores, hyphens, dots — no slashes or colons).
+func isBareKeyName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r == '/' || r == ':' {
+			return false
+		}
+	}
+	return true
+}
+
 func parseIngressRule(v cue.Value) (IngressRule, error) {
 	rule := IngressRule{
 		Tags: make(map[string]string),

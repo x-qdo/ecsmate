@@ -262,3 +262,88 @@ func TestValidateManifestContent_MultipleErrors(t *testing.T) {
 		t.Errorf("expected at least 3 errors, got %d: %v", len(errors), errors)
 	}
 }
+
+func TestValidateManifestContent_SecretsWithoutManagedConfig(t *testing.T) {
+	manifest := &config.Manifest{
+		TaskDefinitions: map[string]config.TaskDefinition{
+			"web": {
+				Type:   "managed",
+				Family: "my-app-web",
+				ContainerDefinitions: []config.ContainerDefinition{
+					{
+						Name:  "app",
+						Image: "nginx:latest",
+						Secrets: []config.Secret{
+							{Name: "GOOD", ValueFrom: "arn:aws:ssm:us-east-1:123:parameter/x"},
+							{Name: "BAD", ValueFrom: "KREDINOR_CI_PASSWORD"},
+						},
+					},
+				},
+			},
+		},
+		Services: map[string]config.Service{
+			"web": {Cluster: "test", TaskDefinition: "web"},
+		},
+	}
+
+	errors := validateManifestContent(manifest)
+	hasSecretError := false
+	for _, e := range errors {
+		if contains(e, "KREDINOR_CI_PASSWORD") {
+			hasSecretError = true
+		}
+	}
+	if !hasSecretError {
+		t.Errorf("expected validation error for bare secret name, got: %v", errors)
+	}
+}
+
+func TestValidateManifestContent_SecretsWithManagedConfig(t *testing.T) {
+	manifest := &config.Manifest{
+		Secrets: &config.SecretsConfig{
+			Managed: &config.ManagedSecretsConfig{
+				File:      "secrets.enc.yaml",
+				KMSKeyArn: "arn:aws:kms:us-east-1:123:key/abc",
+				SSMPrefix: "/myapp/prod",
+			},
+		},
+		TaskDefinitions: map[string]config.TaskDefinition{
+			"web": {
+				Type:   "managed",
+				Family: "my-app-web",
+				ContainerDefinitions: []config.ContainerDefinition{
+					{
+						Name:  "app",
+						Image: "nginx:latest",
+						Secrets: []config.Secret{
+							{Name: "DB_PASS", ValueFrom: "db_password"},
+						},
+					},
+				},
+			},
+		},
+		Services: map[string]config.Service{
+			"web": {Cluster: "test", TaskDefinition: "web"},
+		},
+	}
+
+	errors := validateManifestContent(manifest)
+	for _, e := range errors {
+		if contains(e, "db_password") {
+			t.Errorf("bare key names should be allowed when managed secrets configured, got error: %s", e)
+		}
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchString(s, substr)
+}
+
+func searchString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
