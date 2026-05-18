@@ -448,7 +448,7 @@ func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Man
 		}
 	}
 
-	existingRuleMatches, usedRuleArns := matchExistingListenerRulesWithUsed(manifest.Ingress.Rules, existingRules)
+	existingRuleMatches, usedRuleArns := matchExistingListenerRulesWithUsed(manifest.Ingress.Rules, existingRules, manifest.Name)
 	existingTargetGroupArns := make(map[int]string)
 	for idx, rule := range existingRuleMatches {
 		if rule == nil {

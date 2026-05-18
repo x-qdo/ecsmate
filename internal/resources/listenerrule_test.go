@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -8,6 +9,39 @@ import (
 
 	"github.com/x-qdo/ecsmate/internal/config"
 )
+
+func testIngressRule(priority int, host string) config.IngressRule {
+	return config.IngressRule{
+		Priority: priority,
+		Host:     host,
+		Service: &config.IngressServiceBackend{
+			Name:          "web",
+			ContainerName: "nginx",
+			ContainerPort: 80,
+		},
+	}
+}
+
+func testForwardRule(arn string, priority int, host string, targetGroupArn string) types.Rule {
+	return types.Rule{
+		RuleArn:  aws.String(arn),
+		Priority: aws.String(fmt.Sprintf("%d", priority)),
+		Conditions: []types.RuleCondition{
+			{
+				Field: aws.String("host-header"),
+				HostHeaderConfig: &types.HostHeaderConditionConfig{
+					Values: []string{host},
+				},
+			},
+		},
+		Actions: []types.Action{
+			{
+				Type:           types.ActionTypeEnumForward,
+				TargetGroupArn: aws.String(targetGroupArn),
+			},
+		},
+	}
+}
 
 func TestListenerRuleResource_DetermineAction_NoChange(t *testing.T) {
 	resource := &ListenerRuleResource{
@@ -374,7 +408,7 @@ func TestMatchExistingListenerRulesWithUsed_TracksUsedArns(t *testing.T) {
 		},
 	}
 
-	matches, usedArns := matchExistingListenerRulesWithUsed(desiredRules, existingRules)
+	matches, usedArns := matchExistingListenerRulesWithUsed(desiredRules, existingRules, "")
 
 	if len(matches) != 2 {
 		t.Errorf("expected 2 matches, got %d", len(matches))
@@ -388,6 +422,370 @@ func TestMatchExistingListenerRulesWithUsed_TracksUsedArns(t *testing.T) {
 	}
 	if usedArns["arn:rule-300"] {
 		t.Error("expected arn:rule-300 to NOT be marked as used (orphaned)")
+	}
+}
+
+func TestMatchExistingListenerRulesWithUsed_DoesNotMatchDifferentManifestSamePriority(t *testing.T) {
+	desiredRules := []config.IngressRule{
+		{Priority: 200, Host: "calingo.sandbox.eu.cloudinsurance.app"},
+	}
+
+	existingRules := []types.Rule{
+		{
+			RuleArn:  aws.String("arn:rule-mdn"),
+			Priority: aws.String("200"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"maiden.sandbox.eu.cloudinsurance.app"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r200/abc")},
+			},
+		},
+	}
+
+	matches, usedArns := matchExistingListenerRulesWithUsed(desiredRules, existingRules, "cal")
+
+	if len(matches) != 0 {
+		t.Fatalf("expected no match for different manifest rule at same priority, got %d", len(matches))
+	}
+	if usedArns["arn:rule-mdn"] {
+		t.Fatal("different manifest rule must not be marked used")
+	}
+}
+
+func TestBuildResourcesWithExisting_AssignsNextPriorityWhenRequestedPriorityIsOccupied(t *testing.T) {
+	listenerArn := "arn:aws:elasticloadbalancing:eu-west-1:123:listener/app/alb/abc"
+	manifestRules := []config.IngressRule{
+		{
+			Priority: 200,
+			Host:     "calingo.sandbox.eu.cloudinsurance.app",
+			Service: &config.IngressServiceBackend{
+				Name:          "web",
+				ContainerName: "nginx",
+				ContainerPort: 80,
+			},
+		},
+	}
+
+	existingRules := []types.Rule{
+		{
+			RuleArn:  aws.String("arn:rule-mdn"),
+			Priority: aws.String("200"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"maiden.sandbox.eu.cloudinsurance.app"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r200/abc")},
+			},
+		},
+		{
+			RuleArn:  aws.String("arn:rule-thf"),
+			Priority: aws.String("201"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"thf.sandbox.eu.cloudinsurance.app"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/thf-r201/abc")},
+			},
+		},
+	}
+
+	targetGroupArns := map[int]string{
+		0: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc",
+	}
+
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, "cal", nil, nil)
+
+	if len(resources) != 1 {
+		t.Fatalf("expected one desired listener rule resource, got %d", len(resources))
+	}
+	resource := resources[0]
+	if resource.Action != ListenerRuleActionCreate {
+		t.Fatalf("expected CREATE, got %s", resource.Action)
+	}
+	if resource.Priority != 202 {
+		t.Fatalf("expected next free priority 202, got %d", resource.Priority)
+	}
+	if resource.TargetGroupArn != targetGroupArns[0] {
+		t.Fatalf("expected target group %q, got %q", targetGroupArns[0], resource.TargetGroupArn)
+	}
+	if resource.Current != nil {
+		t.Fatal("different manifest rule must not be treated as current")
+	}
+}
+
+func TestBuildResourcesWithExisting_CascadesShiftInDesiredPriorityOrder(t *testing.T) {
+	listenerArn := "arn:aws:elasticloadbalancing:eu-west-1:123:listener/app/alb/abc"
+	manifestRules := []config.IngressRule{
+		{
+			Priority: 201,
+			Host:     "calingo-admin.sandbox.eu.cloudinsurance.app",
+			Service: &config.IngressServiceBackend{
+				Name:          "web",
+				ContainerName: "nginx",
+				ContainerPort: 80,
+			},
+		},
+		{
+			Priority: 200,
+			Host:     "calingo.sandbox.eu.cloudinsurance.app",
+			Service: &config.IngressServiceBackend{
+				Name:          "web",
+				ContainerName: "nginx",
+				ContainerPort: 80,
+			},
+		},
+	}
+
+	existingRules := []types.Rule{
+		{
+			RuleArn:  aws.String("arn:rule-mdn"),
+			Priority: aws.String("200"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"maiden.sandbox.eu.cloudinsurance.app"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r200/abc")},
+			},
+		},
+	}
+
+	targetGroupArns := map[int]string{
+		0: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r201/abc",
+		1: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc",
+	}
+
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, "cal", nil, nil)
+
+	if len(resources) != 2 {
+		t.Fatalf("expected two desired listener rule resources, got %d", len(resources))
+	}
+
+	prioritiesByHost := map[string]int{}
+	for _, resource := range resources {
+		prioritiesByHost[resource.Desired.Host] = resource.Priority
+	}
+
+	if prioritiesByHost["calingo.sandbox.eu.cloudinsurance.app"] != 201 {
+		t.Fatalf("expected occupied priority 200 to move to 201, got %d", prioritiesByHost["calingo.sandbox.eu.cloudinsurance.app"])
+	}
+	if prioritiesByHost["calingo-admin.sandbox.eu.cloudinsurance.app"] != 202 {
+		t.Fatalf("expected requested priority 201 to shift with the tenant block to 202, got %d", prioritiesByHost["calingo-admin.sandbox.eu.cloudinsurance.app"])
+	}
+}
+
+func TestBuildResourcesWithExisting_ShiftsThirdOverlappingTenantBlock(t *testing.T) {
+	listenerArn := "arn:aws:elasticloadbalancing:eu-west-1:123:listener/app/alb/abc"
+	manifestRules := []config.IngressRule{
+		testIngressRule(200, "calingo.sandbox.eu.cloudinsurance.app"),
+		testIngressRule(201, "calingo-admin.sandbox.eu.cloudinsurance.app"),
+		testIngressRule(202, "calingo-api.sandbox.eu.cloudinsurance.app"),
+	}
+
+	existingRules := []types.Rule{
+		testForwardRule("arn:rule-mdn-main", 200, "maiden.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r200/abc"),
+		testForwardRule("arn:rule-mdn-admin", 201, "maiden-admin.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r201/abc"),
+		testForwardRule("arn:rule-bal-main", 202, "balder.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/bal-r200/abc"),
+		testForwardRule("arn:rule-bal-admin", 203, "balder-admin.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/bal-r201/abc"),
+	}
+
+	targetGroupArns := map[int]string{
+		0: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc",
+		1: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r201/abc",
+		2: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r202/abc",
+	}
+
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, "cal", nil, nil)
+
+	if len(resources) != 3 {
+		t.Fatalf("expected three desired listener rule resources, got %d", len(resources))
+	}
+
+	prioritiesByHost := map[string]int{}
+	actionsByHost := map[string]ListenerRuleAction{}
+	for _, resource := range resources {
+		prioritiesByHost[resource.Desired.Host] = resource.Priority
+		actionsByHost[resource.Desired.Host] = resource.Action
+		if resource.Current != nil {
+			t.Fatalf("expected %s to be created, got matched current rule %s", resource.Desired.Host, resource.Arn)
+		}
+	}
+
+	expectedPriorities := map[string]int{
+		"calingo.sandbox.eu.cloudinsurance.app":       204,
+		"calingo-admin.sandbox.eu.cloudinsurance.app": 205,
+		"calingo-api.sandbox.eu.cloudinsurance.app":   206,
+	}
+	for host, expected := range expectedPriorities {
+		if prioritiesByHost[host] != expected {
+			t.Fatalf("expected %s to shift to priority %d, got %d", host, expected, prioritiesByHost[host])
+		}
+		if actionsByHost[host] != ListenerRuleActionCreate {
+			t.Fatalf("expected %s to be CREATE, got %s", host, actionsByHost[host])
+		}
+	}
+}
+
+func TestBuildResourcesWithExisting_KeepsShiftedPrioritiesOnRerun(t *testing.T) {
+	listenerArn := "arn:aws:elasticloadbalancing:eu-west-1:123:listener/app/alb/abc"
+	manifestRules := []config.IngressRule{
+		testIngressRule(200, "calingo.sandbox.eu.cloudinsurance.app"),
+		testIngressRule(201, "calingo-admin.sandbox.eu.cloudinsurance.app"),
+	}
+
+	existingRules := []types.Rule{
+		testForwardRule("arn:rule-mdn-main", 200, "maiden.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r200/abc"),
+		testForwardRule("arn:rule-mdn-admin", 201, "maiden-admin.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r201/abc"),
+		testForwardRule("arn:rule-bal-main", 202, "balder.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/bal-r200/abc"),
+		testForwardRule("arn:rule-bal-admin", 203, "balder-admin.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/bal-r201/abc"),
+		testForwardRule("arn:rule-cal-main", 204, "calingo.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc"),
+		testForwardRule("arn:rule-cal-admin", 205, "calingo-admin.sandbox.eu.cloudinsurance.app", "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r201/abc"),
+	}
+
+	targetGroupArns := map[int]string{
+		0: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc",
+		1: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r201/abc",
+	}
+
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, "cal", nil, nil)
+
+	if len(resources) != 2 {
+		t.Fatalf("expected two desired listener rule resources, got %d", len(resources))
+	}
+
+	prioritiesByHost := map[string]int{}
+	actionsByHost := map[string]ListenerRuleAction{}
+	for _, resource := range resources {
+		prioritiesByHost[resource.Desired.Host] = resource.Priority
+		actionsByHost[resource.Desired.Host] = resource.Action
+		if resource.Current == nil {
+			t.Fatalf("expected %s to match the existing shifted rule", resource.Desired.Host)
+		}
+	}
+
+	expectedPriorities := map[string]int{
+		"calingo.sandbox.eu.cloudinsurance.app":       204,
+		"calingo-admin.sandbox.eu.cloudinsurance.app": 205,
+	}
+	for host, expected := range expectedPriorities {
+		if prioritiesByHost[host] != expected {
+			t.Fatalf("expected %s to keep priority %d, got %d", host, expected, prioritiesByHost[host])
+		}
+		if actionsByHost[host] != ListenerRuleActionNoop {
+			t.Fatalf("expected %s to be NOOP on rerun, got %s", host, actionsByHost[host])
+		}
+	}
+}
+
+func TestBuildResourcesWithExisting_MatchesOwnPriorityRuleForHostUpdate(t *testing.T) {
+	listenerArn := "arn:aws:elasticloadbalancing:eu-west-1:123:listener/app/alb/abc"
+	manifestRules := []config.IngressRule{
+		{
+			Priority: 200,
+			Host:     "new.calingo.example.com",
+			Service: &config.IngressServiceBackend{
+				Name:          "web",
+				ContainerName: "nginx",
+				ContainerPort: 80,
+			},
+		},
+	}
+
+	existingRules := []types.Rule{
+		{
+			RuleArn:  aws.String("arn:rule-cal"),
+			Priority: aws.String("200"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"old.calingo.example.com"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc")},
+			},
+		},
+	}
+
+	targetGroupArns := map[int]string{
+		0: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc",
+	}
+
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, "cal", nil, nil)
+
+	if len(resources) != 1 {
+		t.Fatalf("expected one desired listener rule resource, got %d", len(resources))
+	}
+	resource := resources[0]
+	if resource.Current == nil {
+		t.Fatal("expected existing cal rule to be matched by priority")
+	}
+	if resource.Action != ListenerRuleActionUpdate {
+		t.Fatalf("expected UPDATE for host change on own rule, got %s", resource.Action)
+	}
+	if resource.Arn != "arn:rule-cal" {
+		t.Fatalf("expected arn:rule-cal, got %s", resource.Arn)
+	}
+}
+
+func TestBuildResourcesWithExisting_ReusesExistingRulePriorityWhenMatchedByConditions(t *testing.T) {
+	listenerArn := "arn:aws:elasticloadbalancing:eu-west-1:123:listener/app/alb/abc"
+	manifestRules := []config.IngressRule{
+		{
+			Priority: 200,
+			Host:     "calingo.sandbox.eu.cloudinsurance.app",
+			Service: &config.IngressServiceBackend{
+				Name:          "web",
+				ContainerName: "nginx",
+				ContainerPort: 80,
+			},
+		},
+	}
+
+	existingRules := []types.Rule{
+		{
+			RuleArn:  aws.String("arn:rule-mdn"),
+			Priority: aws.String("200"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"maiden.sandbox.eu.cloudinsurance.app"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/mdn-r200/abc")},
+			},
+		},
+		{
+			RuleArn:  aws.String("arn:rule-cal"),
+			Priority: aws.String("201"),
+			Conditions: []types.RuleCondition{
+				{Field: aws.String("host-header"), HostHeaderConfig: &types.HostHeaderConditionConfig{Values: []string{"calingo.sandbox.eu.cloudinsurance.app"}}},
+			},
+			Actions: []types.Action{
+				{Type: types.ActionTypeEnumForward, TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc")},
+			},
+		},
+	}
+
+	targetGroupArns := map[int]string{
+		0: "arn:aws:elasticloadbalancing:eu-west-1:123:targetgroup/cal-r200/abc",
+	}
+
+	mgr := &ListenerRuleManager{}
+	resources := mgr.BuildResourcesWithExisting(listenerArn, manifestRules, targetGroupArns, existingRules, "cal", nil, nil)
+
+	if len(resources) != 1 {
+		t.Fatalf("expected one desired listener rule resource, got %d", len(resources))
+	}
+	resource := resources[0]
+	if resource.Action != ListenerRuleActionNoop {
+		t.Fatalf("expected NOOP for matched existing rule, got %s", resource.Action)
+	}
+	if resource.Priority != 201 {
+		t.Fatalf("expected existing priority 201 to be retained, got %d", resource.Priority)
+	}
+	if resource.Arn != "arn:rule-cal" {
+		t.Fatalf("expected arn:rule-cal, got %s", resource.Arn)
 	}
 }
 

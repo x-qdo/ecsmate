@@ -57,7 +57,7 @@ Resources tagged with `ManagedBy=ecsmate` for:
 
 - TargetGroups: naming pattern `{manifestName}-r{priority}` + tag check
 - ServiceDiscovery: by namespace, tag check
-- ListenerRules: by priority within listener
+- ListenerRules: by host/path first; priority fallback only for rules whose target group belongs to the same manifest
 
 ## RECREATE TRIGGERS
 

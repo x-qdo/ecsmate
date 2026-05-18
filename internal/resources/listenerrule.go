@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -59,14 +60,19 @@ func (m *ListenerRuleManager) BuildResources(ctx context.Context, listenerArn st
 
 // BuildResourcesWithExisting builds listener rule resources with manifest tags for ownership filtering.
 func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rules []config.IngressRule, targetGroupArns map[int]string, existingRules []types.Rule, manifestName string, manifestTags map[string]string, tgTags map[string]map[string]string) []*ListenerRuleResource {
-	matches, usedArns := matchExistingListenerRulesWithUsed(rules, existingRules)
+	matches, usedArns := matchExistingListenerRulesWithUsed(rules, existingRules, manifestName)
+	resolvedPriorities := resolveListenerRulePriorities(rules, matches, existingRules)
 
 	var resources []*ListenerRuleResource
 
 	for i := range rules {
 		rule := &rules[i]
+		priority := resolvedPriorities[i]
+		if priority == 0 {
+			priority = rule.Priority
+		}
 		resource := &ListenerRuleResource{
-			Priority:    rule.Priority,
+			Priority:    priority,
 			Desired:     rule,
 			ListenerArn: listenerArn,
 		}
@@ -80,6 +86,13 @@ func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rul
 		if existing, ok := matches[i]; ok && existing != nil {
 			resource.Current = existing
 			resource.Arn = aws.ToString(existing.RuleArn)
+		}
+		if resource.Current == nil && resource.Priority != rule.Priority {
+			log.Warn("listener rule priority occupied; using next available priority",
+				"requested", rule.Priority,
+				"assigned", resource.Priority,
+				"host", rule.Host,
+				"hosts", strings.Join(rule.Hosts, ","))
 		}
 
 		resource.determineAction()
@@ -480,7 +493,7 @@ func (m *ListenerRuleManager) buildRuleActions(rule *config.IngressRule, targetG
 	return result
 }
 
-func matchExistingListenerRulesWithUsed(desired []config.IngressRule, existing []types.Rule) (map[int]*types.Rule, map[string]bool) {
+func matchExistingListenerRulesWithUsed(desired []config.IngressRule, existing []types.Rule, manifestName string) (map[int]*types.Rule, map[string]bool) {
 	matches := make(map[int]*types.Rule)
 	used := make(map[string]bool)
 	existingByPriority := make(map[int]*types.Rule)
@@ -496,19 +509,11 @@ func matchExistingListenerRulesWithUsed(desired []config.IngressRule, existing [
 		}
 	}
 
+	// Prefer condition identity over priority. Priority can collide on shared
+	// listeners across independent manifests; host/path conditions identify the
+	// rule we can safely keep managing.
 	for i := range desired {
 		rule := &desired[i]
-		if rule.Priority > 0 {
-			if ex := existingByPriority[rule.Priority]; ex != nil {
-				arn := aws.ToString(ex.RuleArn)
-				if arn != "" {
-					used[arn] = true
-				}
-				matches[i] = ex
-				continue
-			}
-		}
-
 		if ex := findRuleByConditions(rule, existing, used); ex != nil {
 			arn := aws.ToString(ex.RuleArn)
 			if arn != "" {
@@ -518,7 +523,109 @@ func matchExistingListenerRulesWithUsed(desired []config.IngressRule, existing [
 		}
 	}
 
+	// Fall back to priority only when the occupied rule is owned by the same
+	// manifest. This preserves intentional host/path updates without allowing
+	// one tenant to overwrite another tenant's listener rule at the same
+	// priority.
+	for i := range desired {
+		if matches[i] != nil {
+			continue
+		}
+		rule := &desired[i]
+		if rule.Priority <= 0 {
+			continue
+		}
+		if ex := existingByPriority[rule.Priority]; ex != nil && canMatchListenerRuleByPriority(ex, manifestName) {
+			arn := aws.ToString(ex.RuleArn)
+			if arn != "" {
+				used[arn] = true
+			}
+			matches[i] = ex
+		}
+	}
+
 	return matches, used
+}
+
+func canMatchListenerRuleByPriority(rule *types.Rule, manifestName string) bool {
+	if manifestName == "" {
+		return true
+	}
+	tgName := extractTargetGroupName(extractTargetGroupArn(rule))
+	return isListenerRuleOwnedByManifest(tgName, manifestName)
+}
+
+func resolveListenerRulePriorities(desired []config.IngressRule, matches map[int]*types.Rule, existing []types.Rule) map[int]int {
+	resolved := make(map[int]int, len(desired))
+	occupied := make(map[int]bool)
+	for i := range existing {
+		if priority := parseRulePriority(&existing[i]); priority > 0 {
+			occupied[priority] = true
+		}
+	}
+
+	pending := make([]int, 0, len(desired))
+	for i := range desired {
+		if existingRule := matches[i]; existingRule != nil {
+			if priority := parseRulePriority(existingRule); priority > 0 {
+				resolved[i] = priority
+				continue
+			}
+		}
+		pending = append(pending, i)
+	}
+
+	sort.SliceStable(pending, func(i, j int) bool {
+		left := desired[pending[i]].Priority
+		right := desired[pending[j]].Priority
+		if left == right {
+			return pending[i] < pending[j]
+		}
+		return left < right
+	})
+
+	for _, idx := range pending {
+		priority := nextAvailableListenerRulePriority(desired[idx].Priority, occupied)
+		resolved[idx] = priority
+		occupied[priority] = true
+	}
+
+	return resolved
+}
+
+func parseRulePriority(rule *types.Rule) int {
+	if rule == nil || rule.Priority == nil {
+		return 0
+	}
+	raw := aws.ToString(rule.Priority)
+	if raw == "" || raw == "default" {
+		return 0
+	}
+	priority, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	return priority
+}
+
+func nextAvailableListenerRulePriority(requested int, occupied map[int]bool) int {
+	if requested < 1 {
+		requested = 1
+	}
+	if requested > 50000 {
+		requested = 50000
+	}
+	for priority := requested; priority <= 50000; priority++ {
+		if !occupied[priority] {
+			return priority
+		}
+	}
+	for priority := 1; priority < requested; priority++ {
+		if !occupied[priority] {
+			return priority
+		}
+	}
+	return requested
 }
 
 func findRuleByConditions(desired *config.IngressRule, existing []types.Rule, used map[string]bool) *types.Rule {
