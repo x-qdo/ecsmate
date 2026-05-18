@@ -322,9 +322,10 @@ func TestBuildResourcesWithExisting_DetectsOrphanedRules(t *testing.T) {
 
 	var manifestResource, orphanedResource *ListenerRuleResource
 	for _, r := range resources {
-		if r.Priority == 100 {
+		switch r.Priority {
+		case 100:
 			manifestResource = r
-		} else if r.Priority == 200 {
+		case 200:
 			orphanedResource = r
 		}
 	}

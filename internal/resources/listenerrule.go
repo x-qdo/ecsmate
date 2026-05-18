@@ -126,8 +126,10 @@ func (m *ListenerRuleManager) BuildResourcesWithExisting(listenerArn string, rul
 			continue
 		}
 
-		priorityInt := 0
-		fmt.Sscanf(priority, "%d", &priorityInt)
+		priorityInt, err := strconv.Atoi(priority)
+		if err != nil {
+			continue
+		}
 
 		resource := &ListenerRuleResource{
 			Priority:       priorityInt,
@@ -500,12 +502,9 @@ func matchExistingListenerRulesWithUsed(desired []config.IngressRule, existing [
 
 	for i := range existing {
 		rule := &existing[i]
-		if rule.Priority != nil && aws.ToString(rule.Priority) != "default" {
-			priority := 0
-			fmt.Sscanf(aws.ToString(rule.Priority), "%d", &priority)
-			if priority > 0 {
-				existingByPriority[priority] = rule
-			}
+		priority := parseRulePriority(rule)
+		if priority > 0 {
+			existingByPriority[priority] = rule
 		}
 	}
 

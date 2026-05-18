@@ -271,9 +271,10 @@ func renderStatus(statuses []*awsclient.DeploymentStatus, noColor bool, watchMod
 		// Rollout state
 		if status.RolloutState != "" {
 			rolloutColor := yellow
-			if status.RolloutState == "COMPLETED" {
+			switch status.RolloutState {
+			case "COMPLETED":
 				rolloutColor = green
-			} else if status.RolloutState == "FAILED" {
+			case "FAILED":
 				rolloutColor = red
 			}
 			fmt.Printf("    Rollout: %s\n", rolloutColor(status.RolloutState))

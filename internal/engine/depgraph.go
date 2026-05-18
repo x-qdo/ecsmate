@@ -13,7 +13,6 @@ type DependencyGraph struct {
 	nodes        map[string]*Node
 	edges        map[string][]string // dependencies: what does X depend on?
 	reverseEdges map[string][]string // dependents: what depends on X?
-	resolved     []string
 }
 
 type Node struct {

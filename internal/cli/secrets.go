@@ -74,7 +74,7 @@ var secretsDeleteCmd = &cobra.Command{
 
 func init() {
 	secretsEncryptCmd.Flags().StringVar(&kmsKeyArn, "kms-arn", "", "KMS key ARN for encryption (required)")
-	secretsEncryptCmd.MarkFlagRequired("kms-arn")
+	_ = secretsEncryptCmd.MarkFlagRequired("kms-arn")
 
 	secretsSetCmd.Flags().StringVar(&secretValue, "value", "", "Secret value (reads from stdin if not provided)")
 

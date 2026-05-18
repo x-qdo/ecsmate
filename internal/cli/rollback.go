@@ -48,7 +48,7 @@ func init() {
 	rollbackCmd.Flags().BoolVar(&rollbackList, "list", false, "List available revisions")
 	rollbackCmd.Flags().IntVar(&rollbackListLimit, "limit", 10, "Number of revisions to list")
 	rollbackCmd.Flags().BoolVar(&rollbackNoWait, "no-wait", false, "Don't wait for deployment to complete")
-	rollbackCmd.MarkFlagRequired("service")
+	_ = rollbackCmd.MarkFlagRequired("service")
 }
 
 func runRollback(cmd *cobra.Command, args []string) error {

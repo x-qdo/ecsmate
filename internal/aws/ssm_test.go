@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"context"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func TestSSMClient_ResolveSSMReferences(t *testing.T) {
 			if tt.name == "unclosed reference" {
 				// Test that unclosed reference returns error
 				client := &SSMClient{client: nil}
-				_, err := client.ResolveSSMReferences(nil, tt.input)
+				_, err := client.ResolveSSMReferences(context.TODO(), tt.input)
 				if (err != nil) != tt.hasError {
 					t.Errorf("ResolveSSMReferences() error = %v, wantError %v", err, tt.hasError)
 				}
