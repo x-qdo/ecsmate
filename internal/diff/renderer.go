@@ -1,3 +1,4 @@
+//nolint:errcheck // Diff rendering writes best-effort CLI output; write failures are not actionable here.
 package diff
 
 import (
@@ -136,18 +137,6 @@ func sortByExecutionPhase(entries []DiffEntry) {
 		// Within same phase, sort by name
 		return entries[i].Name < entries[j].Name
 	})
-}
-
-func (r *Renderer) renderResourceGroup(resource string, entries []DiffEntry) {
-	r.hdrColor.Fprintf(r.out, "\n%s:\n", resource+"s")
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name < entries[j].Name
-	})
-
-	for _, entry := range entries {
-		r.renderEntry(entry)
-	}
 }
 
 // renderEntryBoxed renders a single entry with visual box grouping (nelm-style)
@@ -577,85 +566,6 @@ func (r *Renderer) formatAsLines(v interface{}) []string {
 	return strings.Split(string(data), "\n")
 }
 
-func (r *Renderer) renderEntry(entry DiffEntry) {
-	recreateColor := color.New(color.FgYellow)
-
-	switch entry.Type {
-	case DiffTypeCreate:
-		r.addColor.Fprintf(r.out, "  + %s\n", entry.Name)
-		if entry.Details != "" {
-			r.renderDetails(entry.Details, "    ")
-		} else if entry.Desired != nil {
-			r.renderJSON(entry.Desired, "    ", r.addColor)
-		}
-
-	case DiffTypeUpdate:
-		r.hdrColor.Fprintf(r.out, "  ~ %s\n", entry.Name)
-		if entry.Current != nil && entry.Desired != nil {
-			r.renderStructuralDiff(entry.Current, entry.Desired, "    ")
-		} else if entry.Details != "" {
-			r.renderDetails(entry.Details, "    ")
-		}
-
-	case DiffTypeRecreate:
-		recreateColor.Fprintf(r.out, "  -/+ %s (must be recreated)\n", entry.Name)
-		if len(entry.RecreateReasons) > 0 {
-			recreateColor.Fprintf(r.out, "    # Reasons for recreation:\n")
-			for _, reason := range entry.RecreateReasons {
-				recreateColor.Fprintf(r.out, "    #   - %s\n", reason)
-			}
-		}
-		if entry.Current != nil && entry.Desired != nil {
-			r.renderStructuralDiff(entry.Current, entry.Desired, "    ")
-		}
-
-	case DiffTypeDelete:
-		r.delColor.Fprintf(r.out, "  - %s\n", entry.Name)
-		if entry.Details != "" {
-			r.renderDetails(entry.Details, "    ")
-		} else if entry.Current != nil {
-			r.renderJSON(entry.Current, "    ", r.delColor)
-		}
-
-	case DiffTypeNoop:
-		r.ctxColor.Fprintf(r.out, "  = %s (no changes)\n", entry.Name)
-	}
-}
-
-func (r *Renderer) renderDetails(details, prefix string) {
-	for _, line := range strings.Split(details, "\n") {
-		if line != "" {
-			fmt.Fprintf(r.out, "%s%s\n", prefix, line)
-		}
-	}
-}
-
-func (r *Renderer) renderJSON(v interface{}, prefix string, c *color.Color) {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		c.Fprintf(r.out, "%s%s\n", prefix, line)
-	}
-}
-
-// renderStructuralDiff performs a structural comparison and renders differences
-func (r *Renderer) renderStructuralDiff(current, desired interface{}, prefix string) {
-	// Convert to maps for comparison
-	currentMap := toMap(current)
-	desiredMap := toMap(desired)
-
-	if currentMap == nil || desiredMap == nil {
-		// Fall back to simple JSON diff if conversion fails
-		r.renderSimpleValueDiff(current, desired, prefix)
-		return
-	}
-
-	r.renderMapDiff(currentMap, desiredMap, prefix)
-}
-
 func toMap(v interface{}) map[string]interface{} {
 	// If already a map, return it
 	if m, ok := v.(map[string]interface{}); ok {
@@ -676,137 +586,6 @@ func toMap(v interface{}) map[string]interface{} {
 	return m
 }
 
-func (r *Renderer) renderMapDiff(current, desired map[string]interface{}, prefix string) {
-	// Collect all keys
-	allKeys := make(map[string]bool)
-	for k := range current {
-		allKeys[k] = true
-	}
-	for k := range desired {
-		allKeys[k] = true
-	}
-
-	// Sort keys for consistent output
-	keys := make([]string, 0, len(allKeys))
-	for k := range allKeys {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
-		currentVal, currentExists := current[key]
-		desiredVal, desiredExists := desired[key]
-
-		if !currentExists {
-			// New field
-			r.addColor.Fprintf(r.out, "%s+ %s: ", prefix, key)
-			r.renderInlineValue(desiredVal, r.addColor)
-			fmt.Fprintln(r.out)
-		} else if !desiredExists {
-			// Removed field
-			r.delColor.Fprintf(r.out, "%s- %s: ", prefix, key)
-			r.renderInlineValue(currentVal, r.delColor)
-			fmt.Fprintln(r.out)
-		} else if !deepEqual(currentVal, desiredVal) {
-			// Changed field
-			r.renderFieldDiff(key, currentVal, desiredVal, prefix)
-		}
-		// Skip unchanged fields
-	}
-}
-
-func (r *Renderer) renderFieldDiff(key string, current, desired interface{}, prefix string) {
-	// Handle arrays specially - try to match by name/identifier
-	currentArr, currentIsArr := current.([]interface{})
-	desiredArr, desiredIsArr := desired.([]interface{})
-
-	if currentIsArr && desiredIsArr {
-		r.hdrColor.Fprintf(r.out, "%s~ %s:\n", prefix, key)
-		r.renderArrayDiff(currentArr, desiredArr, prefix+"  ")
-		return
-	}
-
-	// Handle nested objects
-	currentMap, currentIsMap := current.(map[string]interface{})
-	desiredMap, desiredIsMap := desired.(map[string]interface{})
-
-	if currentIsMap && desiredIsMap {
-		r.hdrColor.Fprintf(r.out, "%s~ %s:\n", prefix, key)
-		r.renderMapDiff(currentMap, desiredMap, prefix+"  ")
-		return
-	}
-
-	// Simple value change
-	r.hdrColor.Fprintf(r.out, "%s~ %s: ", prefix, key)
-	r.delColor.Fprint(r.out, formatValue(current))
-	r.ctxColor.Fprint(r.out, " -> ")
-	r.addColor.Fprintln(r.out, formatValue(desired))
-}
-
-func (r *Renderer) renderArrayDiff(current, desired []interface{}, prefix string) {
-	// Try to match array elements by "name" field (common in ECS for containers, etc.)
-	currentByName := indexByName(current)
-	desiredByName := indexByName(desired)
-
-	// If we can index by name, do structural diff
-	if len(currentByName) > 0 || len(desiredByName) > 0 {
-		allNames := make(map[string]bool)
-		for name := range currentByName {
-			allNames[name] = true
-		}
-		for name := range desiredByName {
-			allNames[name] = true
-		}
-
-		names := make([]string, 0, len(allNames))
-		for name := range allNames {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-
-		for _, name := range names {
-			currentItem, currentExists := currentByName[name]
-			desiredItem, desiredExists := desiredByName[name]
-
-			if !currentExists {
-				// New item
-				r.addColor.Fprintf(r.out, "%s+ [name=%s]:\n", prefix, name)
-				r.renderJSON(desiredItem, prefix+"  ", r.addColor)
-			} else if !desiredExists {
-				// Removed item
-				r.delColor.Fprintf(r.out, "%s- [name=%s]:\n", prefix, name)
-				r.renderJSON(currentItem, prefix+"  ", r.delColor)
-			} else if !deepEqual(currentItem, desiredItem) {
-				// Changed item
-				r.hdrColor.Fprintf(r.out, "%s~ [name=%s]:\n", prefix, name)
-				currentMap := currentItem.(map[string]interface{})
-				desiredMap := desiredItem.(map[string]interface{})
-				r.renderMapDiff(currentMap, desiredMap, prefix+"  ")
-			}
-		}
-		return
-	}
-
-	// Fall back to index-based comparison for arrays without name field
-	maxLen := len(current)
-	if len(desired) > maxLen {
-		maxLen = len(desired)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		if i >= len(current) {
-			r.addColor.Fprintf(r.out, "%s+ [%d]:\n", prefix, i)
-			r.renderJSON(desired[i], prefix+"  ", r.addColor)
-		} else if i >= len(desired) {
-			r.delColor.Fprintf(r.out, "%s- [%d]:\n", prefix, i)
-			r.renderJSON(current[i], prefix+"  ", r.delColor)
-		} else if !deepEqual(current[i], desired[i]) {
-			r.hdrColor.Fprintf(r.out, "%s~ [%d]:\n", prefix, i)
-			r.renderStructuralDiff(current[i], desired[i], prefix+"  ")
-		}
-	}
-}
-
 func indexByName(arr []interface{}) map[string]interface{} {
 	result := make(map[string]interface{})
 	for _, item := range arr {
@@ -817,47 +596,6 @@ func indexByName(arr []interface{}) map[string]interface{} {
 		}
 	}
 	return result
-}
-
-func (r *Renderer) renderInlineValue(v interface{}, c *color.Color) {
-	c.Fprint(r.out, formatValue(v))
-}
-
-func formatValue(v interface{}) string {
-	switch val := v.(type) {
-	case string:
-		return fmt.Sprintf("%q", val)
-	case float64:
-		if val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val))
-		}
-		return fmt.Sprintf("%g", val)
-	case bool:
-		return fmt.Sprintf("%t", val)
-	case nil:
-		return "null"
-	case []interface{}:
-		if len(val) == 0 {
-			return "[]"
-		}
-		// For small arrays, show inline
-		if len(val) <= 3 {
-			items := make([]string, len(val))
-			for i, item := range val {
-				items[i] = formatValue(item)
-			}
-			return "[" + strings.Join(items, ", ") + "]"
-		}
-		return fmt.Sprintf("[...%d items]", len(val))
-	case map[string]interface{}:
-		if len(val) == 0 {
-			return "{}"
-		}
-		return fmt.Sprintf("{...%d fields}", len(val))
-	default:
-		data, _ := json.Marshal(v)
-		return string(data)
-	}
 }
 
 // formatSimpleValue formats only simple scalar values, returning empty for complex types
@@ -903,11 +641,6 @@ func isSimpleArray(arr []interface{}) bool {
 		}
 	}
 	return true
-}
-
-func (r *Renderer) renderSimpleValueDiff(current, desired interface{}, prefix string) {
-	r.delColor.Fprintf(r.out, "%s- %s\n", prefix, formatValue(current))
-	r.addColor.Fprintf(r.out, "%s+ %s\n", prefix, formatValue(desired))
 }
 
 func deepEqual(a, b interface{}) bool {

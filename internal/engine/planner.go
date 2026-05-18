@@ -873,21 +873,6 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 	}
 }
 
-func resolveTargetGroupArn(targetGroups map[string]*resources.TargetGroupResource, manifestName string, priority int) string {
-	if targetGroups == nil || manifestName == "" || priority == 0 {
-		return ""
-	}
-
-	targetGroupName := fmt.Sprintf("%s-r%d", manifestName, priority)
-	for _, tg := range targetGroups {
-		if tg != nil && tg.Name == targetGroupName {
-			return tg.Arn
-		}
-	}
-
-	return ""
-}
-
 // resolveTargetGroupArnForView returns the ARN for diff view display.
 // Returns placeholder only when TG is being created or recreated (new ARN will be assigned).
 // For existing TGs (NOOP/UPDATE), returns the existing ARN.

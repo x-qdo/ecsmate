@@ -1,3 +1,4 @@
+//nolint:errcheck // Tracker rendering writes best-effort CLI progress output; write failures are not actionable here.
 package engine
 
 import (
@@ -658,9 +659,10 @@ func (t *Tracker) renderServiceProgress(state *ServiceProgressState) int {
 
 	// Rollout state
 	rolloutColor := t.dimColor
-	if status == "COMPLETED" {
+	switch status {
+	case "COMPLETED":
 		rolloutColor = t.successColor
-	} else if status == "FAILED" {
+	case "FAILED":
 		rolloutColor = t.errorColor
 	}
 	rolloutColor.Fprintf(t.out, "     Rollout: %s\n", status)

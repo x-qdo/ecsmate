@@ -278,9 +278,8 @@ func TestE2E_ComplexDependencyChain(t *testing.T) {
 	}
 
 	// ServiceB should NOT be updated (its TaskDef is different, DependsOn doesn't propagate updates)
-	if _, ok := changes["Service/serviceB"]; ok {
-		// This is actually expected behavior - DependsOn creates execution order dependency
-		// but doesn't propagate changes
+	if change, ok := changes["Service/serviceB"]; ok {
+		t.Fatalf("Service/serviceB should not be updated through DependsOn only, got %+v", change)
 	}
 }
 
@@ -387,58 +386,5 @@ func TestE2E_DeletionOrder_RespectsDependencies(t *testing.T) {
 	}
 	if rule2Idx == -1 || rule2Idx > tgIdx {
 		t.Error("ListenerRule/priority-2 must be deleted before TargetGroup")
-	}
-}
-
-func buildIngressState() *resources.DesiredState {
-	tgArn := "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/app-r1/abc"
-	return &resources.DesiredState{
-		Manifest: &config.Manifest{
-			Name: "app",
-			Ingress: &config.Ingress{
-				ListenerArn: "arn:aws:elasticloadbalancing:us-east-1:123:listener/app/abc/def",
-				Rules: []config.IngressRule{
-					{
-						Priority: 1,
-						Host:     "api.example.com",
-						Service: &config.IngressServiceBackend{
-							Name:          "web",
-							ContainerName: "app",
-							ContainerPort: 80,
-						},
-					},
-				},
-			},
-		},
-		Services: map[string]*resources.ServiceResource{
-			"web": {
-				Name:   "web",
-				Action: resources.ServiceActionNoop,
-				Desired: &config.Service{
-					Name: "web",
-					LoadBalancers: []config.LoadBalancer{
-						{
-							TargetGroupArn: tgArn,
-							ContainerName:  "app",
-							ContainerPort:  80,
-						},
-					},
-				},
-			},
-		},
-		TargetGroups: map[string]*resources.TargetGroupResource{
-			"app-r1": {
-				Name:   "app-r1",
-				Arn:    tgArn,
-				Action: resources.TargetGroupActionNoop,
-			},
-		},
-		ListenerRules: []*resources.ListenerRuleResource{
-			{
-				Priority:       1,
-				TargetGroupArn: tgArn,
-				Action:         resources.ListenerRuleActionNoop,
-			},
-		},
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -375,8 +376,10 @@ func (e *Executor) applyTargetGroups(ctx context.Context, plan *ExecutionPlan) (
 		}
 
 		// Store the ARN for later use in listener rules
-		var idx int
-		fmt.Sscanf(key, "rule-%d", &idx)
+		idx, err := strconv.Atoi(strings.TrimPrefix(key, "rule-"))
+		if err != nil {
+			return nil, fmt.Errorf("invalid target group key %q: %w", key, err)
+		}
 		targetGroupArns[idx] = resource.Arn
 	}
 

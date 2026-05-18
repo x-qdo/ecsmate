@@ -531,15 +531,14 @@ func TestMergeSecrets(t *testing.T) {
 
 func TestTaskDefResource_TypeValidation(t *testing.T) {
 	tests := []struct {
-		name     string
-		tdType   string
-		hasError bool
+		name   string
+		tdType string
 	}{
-		{"managed type", "managed", false},
-		{"merged type", "merged", false},
-		{"remote type", "remote", false},
-		{"invalid type", "invalid", true},
-		{"empty type", "", true},
+		{"managed type", "managed"},
+		{"merged type", "merged"},
+		{"remote type", "remote"},
+		{"invalid type", "invalid"},
+		{"empty type", ""},
 	}
 
 	for _, tt := range tests {
@@ -547,16 +546,6 @@ func TestTaskDefResource_TypeValidation(t *testing.T) {
 			td := &config.TaskDefinition{
 				Name: "test",
 				Type: tt.tdType,
-			}
-
-			switch tt.tdType {
-			case "managed", "merged", "remote", "":
-				// These are valid or will fail validation elsewhere
-			default:
-				// Test that unknown type would return error
-				if tt.tdType != "managed" && tt.tdType != "merged" && tt.tdType != "remote" && tt.tdType != "" {
-					// Would error in BuildResource
-				}
 			}
 
 			// Verify type is set correctly

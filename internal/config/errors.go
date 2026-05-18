@@ -38,29 +38,29 @@ func (e *ManifestError) Print(w io.Writer, useColor bool) {
 		bold = "\033[1m"
 	}
 
-	fmt.Fprintf(w, "\n%s%sManifest Error%s%s\n", red, bold, reset, reset)
-	fmt.Fprintf(w, "%s%s%s\n\n", dim, strings.Repeat("─", 50), reset)
+	_, _ = fmt.Fprintf(w, "\n%s%sManifest Error%s%s\n", red, bold, reset, reset)
+	_, _ = fmt.Fprintf(w, "%s%s%s\n\n", dim, strings.Repeat("─", 50), reset)
 
-	fmt.Fprintf(w, "%s%s%s\n", red, e.Summary, reset)
+	_, _ = fmt.Fprintf(w, "%s%s%s\n", red, e.Summary, reset)
 
 	if len(e.Details) > 0 {
-		fmt.Fprintf(w, "\n%sDetails:%s\n", yellow, reset)
+		_, _ = fmt.Fprintf(w, "\n%sDetails:%s\n", yellow, reset)
 		for _, detail := range e.Details {
 			// Indent each line of the detail
 			lines := strings.Split(detail, "\n")
 			for _, line := range lines {
 				if line != "" {
-					fmt.Fprintf(w, "  %s%s%s\n", cyan, line, reset)
+					_, _ = fmt.Fprintf(w, "  %s%s%s\n", cyan, line, reset)
 				}
 			}
 		}
 	}
 
 	if e.Hint != "" {
-		fmt.Fprintf(w, "\n%sHint:%s %s\n", yellow, reset, e.Hint)
+		_, _ = fmt.Fprintf(w, "\n%sHint:%s %s\n", yellow, reset, e.Hint)
 	}
 
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 }
 
 // NewCUEBuildError creates a ManifestError for CUE build failures.

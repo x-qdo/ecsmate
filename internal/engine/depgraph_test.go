@@ -84,9 +84,15 @@ func TestDependencyGraph_TopologicalSort_CircularDependency(t *testing.T) {
 	graph.AddNode("b", nil)
 	graph.AddNode("c", nil)
 
-	graph.AddEdge("a", "b")
-	graph.AddEdge("b", "c")
-	graph.AddEdge("c", "a")
+	if err := graph.AddEdge("a", "b"); err != nil {
+		t.Fatalf("failed to add edge a->b: %v", err)
+	}
+	if err := graph.AddEdge("b", "c"); err != nil {
+		t.Fatalf("failed to add edge b->c: %v", err)
+	}
+	if err := graph.AddEdge("c", "a"); err != nil {
+		t.Fatalf("failed to add edge c->a: %v", err)
+	}
 
 	_, err := graph.TopologicalSort()
 	if err == nil {
@@ -300,8 +306,12 @@ func TestDependencyGraph_ReverseEdges(t *testing.T) {
 	g.AddNodeWithType("Service/worker", "Service", "worker", nil)
 
 	// Both services depend on task def
-	g.AddEdge("TaskDef/web", "Service/api")
-	g.AddEdge("TaskDef/web", "Service/worker")
+	if err := g.AddEdge("TaskDef/web", "Service/api"); err != nil {
+		t.Fatalf("failed to add edge TaskDef/web->Service/api: %v", err)
+	}
+	if err := g.AddEdge("TaskDef/web", "Service/worker"); err != nil {
+		t.Fatalf("failed to add edge TaskDef/web->Service/worker: %v", err)
+	}
 
 	// Check dependents (reverse lookup)
 	dependents := g.GetDependents("TaskDef/web")
