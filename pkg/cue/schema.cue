@@ -16,6 +16,7 @@ package schema
 		file:          string
 		kmsKeyArn:     string
 		kmsKeyRegion?: string
+		ssmKmsKeyId?:  string
 		ssmPrefix:     string
 	}
 	external?: [string]: string

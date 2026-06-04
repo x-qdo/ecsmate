@@ -138,6 +138,7 @@ Required for all ecsmate operations (`diff`, `apply`, `status`, `rollback`):
       "Sid": "KMS",
       "Effect": "Allow",
       "Action": [
+        "kms:Encrypt",
         "kms:GenerateDataKey",
         "kms:Decrypt"
       ],
@@ -292,7 +293,7 @@ Replace placeholders with actual values:
 - `ACCOUNT_ID` - AWS account ID
 - `CLUSTER_NAME` - ECS cluster name
 - `SECRETS_PREFIX` - SSM parameter prefix for managed secrets (e.g., `/myapp/prod`)
-- `KMS_KEY_ID` - KMS key ID for secrets encryption
+- `KMS_KEY_ID` - KMS key ID for secrets file encryption, and for SSM SecureString encryption if using `ssmKmsKeyId`
 
 ```json
 {
@@ -436,6 +437,7 @@ Replace placeholders with actual values:
       "Sid": "KMS",
       "Effect": "Allow",
       "Action": [
+        "kms:Encrypt",
         "kms:GenerateDataKey",
         "kms:Decrypt"
       ],

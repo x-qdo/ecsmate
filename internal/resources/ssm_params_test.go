@@ -13,20 +13,22 @@ import (
 )
 
 type mockSSMClient struct {
-	params   map[string]string
-	tags     map[string][]types.Tag
-	putCalls []string
-	delCalls []string
-	failGet  map[string]bool
-	failPut  bool
-	failTags bool
+	params    map[string]string
+	tags      map[string][]types.Tag
+	putCalls  []string
+	putKeyIDs map[string]string
+	delCalls  []string
+	failGet   map[string]bool
+	failPut   bool
+	failTags  bool
 }
 
 func newMockSSMClient() *mockSSMClient {
 	return &mockSSMClient{
-		params:  make(map[string]string),
-		tags:    make(map[string][]types.Tag),
-		failGet: make(map[string]bool),
+		params:    make(map[string]string),
+		tags:      make(map[string][]types.Tag),
+		putKeyIDs: make(map[string]string),
+		failGet:   make(map[string]bool),
 	}
 }
 
@@ -53,6 +55,7 @@ func (m *mockSSMClient) PutParameter(ctx context.Context, input *ssm.PutParamete
 	}
 	name := aws.ToString(input.Name)
 	m.params[name] = aws.ToString(input.Value)
+	m.putKeyIDs[name] = aws.ToString(input.KeyId)
 	m.putCalls = append(m.putCalls, name)
 	return &ssm.PutParameterOutput{Version: 1}, nil
 }
@@ -305,6 +308,51 @@ func TestSSMParamsManager_Diff_MultipleSecrets(t *testing.T) {
 	}
 	if !actions["update"] {
 		t.Error("expected an update action")
+	}
+}
+
+func TestSSMParamsManager_ApplyUsesSSMKMSKeyID(t *testing.T) {
+	mock := newMockSSMClient()
+	managed := &config.ManagedSecrets{
+		Decrypted: map[string]string{
+			"db_password": "secret123",
+		},
+		SSMPrefix:    "/myapp",
+		SSMKMSKeyID:  "alias/app-ssm",
+		KMSKeyArn:    "arn:aws:kms:eu-west-1:123456789012:key/source",
+		KMSKeyRegion: "eu-west-1",
+		Region:       "us-east-2",
+	}
+
+	mgr := NewSSMParamsManager(mock, managed)
+	if err := mgr.Apply(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := mock.putKeyIDs["/myapp/db_password"]; got != "alias/app-ssm" {
+		t.Fatalf("expected PutParameter KeyId alias/app-ssm, got %q", got)
+	}
+}
+
+func TestSSMParamsManager_ApplyOmitsKeyIDWhenUnset(t *testing.T) {
+	mock := newMockSSMClient()
+	managed := &config.ManagedSecrets{
+		Decrypted: map[string]string{
+			"db_password": "secret123",
+		},
+		SSMPrefix:    "/myapp",
+		KMSKeyArn:    "arn:aws:kms:eu-west-1:123456789012:key/source",
+		KMSKeyRegion: "eu-west-1",
+		Region:       "us-east-2",
+	}
+
+	mgr := NewSSMParamsManager(mock, managed)
+	if err := mgr.Apply(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := mock.putKeyIDs["/myapp/db_password"]; got != "" {
+		t.Fatalf("expected PutParameter KeyId to be unset, got %q", got)
 	}
 }
 

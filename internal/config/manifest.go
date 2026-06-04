@@ -28,6 +28,7 @@ type ManagedSecretsConfig struct {
 	File         string
 	KMSKeyArn    string
 	KMSKeyRegion string
+	SSMKMSKeyID  string
 	SSMPrefix    string
 }
 
@@ -468,6 +469,9 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 			}
 			if kmsRegion, err := ExtractString(managed, "kmsKeyRegion"); err == nil {
 				manifest.Secrets.Managed.KMSKeyRegion = kmsRegion
+			}
+			if ssmKMSKeyID, err := ExtractString(managed, "ssmKmsKeyId"); err == nil {
+				manifest.Secrets.Managed.SSMKMSKeyID = ssmKMSKeyID
 			}
 			if prefix, err := ExtractString(managed, "ssmPrefix"); err == nil {
 				manifest.Secrets.Managed.SSMPrefix = prefix

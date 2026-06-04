@@ -51,6 +51,7 @@ manifest: schema.#Manifest & {
 			file: "secrets.enc.yaml"
 			kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/abc"
 			kmsKeyRegion: "us-east-1"
+			ssmKmsKeyId: "alias/app-ssm"
 			ssmPrefix: "/test/prod"
 		}
 	}

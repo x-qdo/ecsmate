@@ -94,6 +94,40 @@ func TestManagedSecretsKMSRegion_DefaultsToDeploymentRegion(t *testing.T) {
 	}
 }
 
+func TestManagedSecretsSSMKMSKeyID_UsesExplicitSSMKey(t *testing.T) {
+	cfg := &ManagedSecretsConfig{
+		KMSKeyArn:   "arn:aws:kms:eu-west-1:123456789012:key/source",
+		SSMKMSKeyID: "arn:aws:kms:us-east-2:123456789012:key/ssm",
+	}
+
+	keyID := managedSecretsSSMKMSKeyID(cfg, "us-east-2")
+	if keyID != cfg.SSMKMSKeyID {
+		t.Fatalf("expected explicit SSM KMS key ID %q, got %q", cfg.SSMKMSKeyID, keyID)
+	}
+}
+
+func TestManagedSecretsSSMKMSKeyID_UsesKMSKeyArnWhenSameRegion(t *testing.T) {
+	cfg := &ManagedSecretsConfig{
+		KMSKeyArn: "arn:aws:kms:us-east-2:123456789012:key/source",
+	}
+
+	keyID := managedSecretsSSMKMSKeyID(cfg, "us-east-2")
+	if keyID != cfg.KMSKeyArn {
+		t.Fatalf("expected same-region KMS key ARN %q, got %q", cfg.KMSKeyArn, keyID)
+	}
+}
+
+func TestManagedSecretsSSMKMSKeyID_SkipsCrossRegionKMSKeyArn(t *testing.T) {
+	cfg := &ManagedSecretsConfig{
+		KMSKeyArn: "arn:aws:kms:eu-west-1:123456789012:key/source",
+	}
+
+	keyID := managedSecretsSSMKMSKeyID(cfg, "us-east-2")
+	if keyID != "" {
+		t.Fatalf("expected cross-region KMS key ARN to be skipped for SSM, got %q", keyID)
+	}
+}
+
 func TestResolveManagedSecrets_NilManaged(t *testing.T) {
 	manifest := &Manifest{
 		TaskDefinitions: map[string]TaskDefinition{
