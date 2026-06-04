@@ -195,6 +195,38 @@ func TestParseManifest_RemoteTaskDef(t *testing.T) {
 	}
 }
 
+func TestParseManifest_ManagedSecretsKMSKeyRegion(t *testing.T) {
+	ctx := cuecontext.New()
+	cueStr := `{
+		name: "secret-app"
+		secrets: {
+			managed: {
+				file: "secrets.enc.yaml"
+				kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/abc"
+				kmsKeyRegion: "us-east-1"
+				ssmPrefix: "/secret-app/prod"
+			}
+		}
+	}`
+
+	value := ctx.CompileString(cueStr)
+	if value.Err() != nil {
+		t.Fatalf("failed to compile CUE: %v", value.Err())
+	}
+
+	manifest, err := ParseManifest(value)
+	if err != nil {
+		t.Fatalf("failed to parse manifest: %v", err)
+	}
+
+	if manifest.Secrets == nil || manifest.Secrets.Managed == nil {
+		t.Fatal("expected managed secrets config")
+	}
+	if manifest.Secrets.Managed.KMSKeyRegion != "us-east-1" {
+		t.Fatalf("expected KMS key region us-east-1, got %q", manifest.Secrets.Managed.KMSKeyRegion)
+	}
+}
+
 func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 	ctx := cuecontext.New()
 	cueStr := `{
@@ -303,6 +335,66 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 	}
 	if cd.LogConfiguration.Options["awslogs-group"] != "/ecs/my-app" {
 		t.Errorf("unexpected awslogs-group: %s", cd.LogConfiguration.Options["awslogs-group"])
+	}
+}
+
+func TestParseManifest_LogSubscriptionFilters(t *testing.T) {
+	ctx := cuecontext.New()
+	cueStr := `{
+		name: "log-filter-app"
+		taskDefinitions: {
+			web: {
+				type: "managed"
+				containerDefinitions: [{
+					name: "app"
+					image: "nginx:latest"
+					logConfiguration: {
+						logDriver: "awslogs"
+						options: {
+							"awslogs-group": "/ecs/log-filter-app"
+						}
+						createLogGroup: true
+						subscriptionFilters: [{
+							name: "slack-error-forwarder"
+							destinationArn: "arn:aws:lambda:eu-west-1:123456789012:function:slack"
+							filterPattern: "?ERROR ?Error ?error ?Exception ?CRITICAL ?Critical ?Fatal ?fatal"
+						}, {
+							name: "audit-stream"
+							destinationArn: "arn:aws:kinesis:eu-west-1:123456789012:stream:audit"
+							roleArn: "arn:aws:iam::123456789012:role/log-delivery"
+							distribution: "Random"
+						}]
+					}
+				}]
+			}
+		}
+	}`
+
+	value := ctx.CompileString(cueStr)
+	if value.Err() != nil {
+		t.Fatalf("failed to compile CUE: %v", value.Err())
+	}
+
+	manifest, err := ParseManifest(value)
+	if err != nil {
+		t.Fatalf("failed to parse manifest: %v", err)
+	}
+
+	filters := manifest.TaskDefinitions["web"].ContainerDefinitions[0].LogConfiguration.SubscriptionFilters
+	if len(filters) != 2 {
+		t.Fatalf("expected 2 subscription filters, got %d", len(filters))
+	}
+	if filters[0].Name != "slack-error-forwarder" {
+		t.Errorf("expected first filter name slack-error-forwarder, got %s", filters[0].Name)
+	}
+	if filters[0].FilterPattern != "?ERROR ?Error ?error ?Exception ?CRITICAL ?Critical ?Fatal ?fatal" {
+		t.Errorf("unexpected filter pattern: %s", filters[0].FilterPattern)
+	}
+	if filters[1].FilterPattern != "" {
+		t.Errorf("expected omitted filterPattern to default to empty string, got %s", filters[1].FilterPattern)
+	}
+	if filters[1].RoleArn == "" || filters[1].Distribution != "Random" {
+		t.Errorf("expected role and Random distribution, got role=%q distribution=%q", filters[1].RoleArn, filters[1].Distribution)
 	}
 }
 

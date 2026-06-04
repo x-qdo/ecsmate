@@ -25,9 +25,10 @@ type SecretsConfig struct {
 }
 
 type ManagedSecretsConfig struct {
-	File      string
-	KMSKeyArn string
-	SSMPrefix string
+	File         string
+	KMSKeyArn    string
+	KMSKeyRegion string
+	SSMPrefix    string
 }
 
 type LogGroup struct {
@@ -234,10 +235,19 @@ type LogConfiguration struct {
 	SecretOptions []Secret
 
 	// Log group management (only for awslogs driver)
-	CreateLogGroup  bool
-	RetentionInDays int
-	KMSKeyID        string
-	LogGroupTags    map[string]string
+	CreateLogGroup      bool
+	RetentionInDays     int
+	KMSKeyID            string
+	LogGroupTags        map[string]string
+	SubscriptionFilters []SubscriptionFilter
+}
+
+type SubscriptionFilter struct {
+	Name           string
+	DestinationArn string
+	FilterPattern  string
+	RoleArn        string
+	Distribution   string
 }
 
 type ContainerDependency struct {
@@ -455,6 +465,9 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 			}
 			if kmsArn, err := ExtractString(managed, "kmsKeyArn"); err == nil {
 				manifest.Secrets.Managed.KMSKeyArn = kmsArn
+			}
+			if kmsRegion, err := ExtractString(managed, "kmsKeyRegion"); err == nil {
+				manifest.Secrets.Managed.KMSKeyRegion = kmsRegion
 			}
 			if prefix, err := ExtractString(managed, "ssmPrefix"); err == nil {
 				manifest.Secrets.Managed.SSMPrefix = prefix
@@ -759,6 +772,44 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 						cd.LogConfiguration.LogGroupTags[key] = val
 					}
 				}
+			}
+		}
+		subscriptionFilters := logConfig.LookupPath(cue.ParsePath("subscriptionFilters"))
+		if subscriptionFilters.Exists() {
+			iter, err := subscriptionFilters.List()
+			if err != nil {
+				return cd, fmt.Errorf("failed to list subscription filters: %w", err)
+			}
+
+			i := 0
+			for iter.Next() {
+				filter := SubscriptionFilter{}
+				filterValue := iter.Value()
+
+				name, err := ExtractString(filterValue, "name")
+				if err != nil {
+					return cd, fmt.Errorf("subscriptionFilters[%d].name is required: %w", i, err)
+				}
+				filter.Name = name
+
+				destinationArn, err := ExtractString(filterValue, "destinationArn")
+				if err != nil {
+					return cd, fmt.Errorf("subscriptionFilters[%d].destinationArn is required: %w", i, err)
+				}
+				filter.DestinationArn = destinationArn
+
+				if pattern, err := ExtractString(filterValue, "filterPattern"); err == nil {
+					filter.FilterPattern = pattern
+				}
+				if roleArn, err := ExtractString(filterValue, "roleArn"); err == nil {
+					filter.RoleArn = roleArn
+				}
+				if distribution, err := ExtractString(filterValue, "distribution"); err == nil {
+					filter.Distribution = distribution
+				}
+
+				cd.LogConfiguration.SubscriptionFilters = append(cd.LogConfiguration.SubscriptionFilters, filter)
+				i++
 			}
 		}
 	}

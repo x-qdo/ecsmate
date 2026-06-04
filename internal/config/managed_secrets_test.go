@@ -74,6 +74,26 @@ func TestManagedSecrets_BuildARNMap_DifferentRegion(t *testing.T) {
 	}
 }
 
+func TestManagedSecretsKMSRegion_UsesConfiguredKeyRegion(t *testing.T) {
+	cfg := &ManagedSecretsConfig{
+		KMSKeyRegion: "us-east-1",
+	}
+
+	region := managedSecretsKMSRegion(cfg, "eu-west-1")
+	if region != "us-east-1" {
+		t.Fatalf("expected configured KMS key region us-east-1, got %q", region)
+	}
+}
+
+func TestManagedSecretsKMSRegion_DefaultsToDeploymentRegion(t *testing.T) {
+	cfg := &ManagedSecretsConfig{}
+
+	region := managedSecretsKMSRegion(cfg, "eu-west-1")
+	if region != "eu-west-1" {
+		t.Fatalf("expected deployment region eu-west-1, got %q", region)
+	}
+}
+
 func TestResolveManagedSecrets_NilManaged(t *testing.T) {
 	manifest := &Manifest{
 		TaskDefinitions: map[string]TaskDefinition{

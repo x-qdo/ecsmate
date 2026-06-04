@@ -320,7 +320,11 @@ func (e *Executor) applyLogGroups(ctx context.Context, plan *ExecutionPlan) erro
 
 		e.tracker.AddTask(name, "log-group")
 
-		if resource.Action == resources.LogGroupActionNoop {
+		needsSubscriptionReconcile, err := e.logGroupManager.NeedsSubscriptionReconcile(ctx, resource)
+		if err != nil {
+			return fmt.Errorf("log group %s: failed to inspect subscription filter state: %w", name, err)
+		}
+		if resource.Action == resources.LogGroupActionNoop && !needsSubscriptionReconcile {
 			e.tracker.SkipTask(name, "unchanged")
 			continue
 		}
@@ -332,7 +336,11 @@ func (e *Executor) applyLogGroups(ctx context.Context, plan *ExecutionPlan) erro
 			return fmt.Errorf("log group %s: %w", name, err)
 		}
 
-		e.tracker.CompleteTask(name, string(resource.Action))
+		result := string(resource.Action)
+		if resource.Action == resources.LogGroupActionNoop && needsSubscriptionReconcile {
+			result = "RECONCILED"
+		}
+		e.tracker.CompleteTask(name, result)
 	}
 
 	return nil

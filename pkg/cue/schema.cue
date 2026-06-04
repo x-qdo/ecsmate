@@ -13,9 +13,10 @@ package schema
 
 #SecretsConfig: {
 	managed?: {
-		file:      string
-		kmsKeyArn: string
-		ssmPrefix: string
+		file:          string
+		kmsKeyArn:     string
+		kmsKeyRegion?: string
+		ssmPrefix:     string
 	}
 	external?: [string]: string
 }
@@ -136,6 +137,13 @@ package schema
 	retentionInDays?: 1 | 3 | 5 | 7 | 14 | 30 | 60 | 90 | 120 | 150 | 180 | 365 | 400 | 545 | 731 | 1096 | 1827 | 2192 | 2557 | 2922 | 3288 | 3653
 	kmsKeyId?:        string
 	logGroupTags?: [string]: string
+	subscriptionFilters?: [...{
+		name:           string
+		destinationArn: string
+		filterPattern?: string | *""
+		roleArn?:       string
+		distribution?:  "ByLogStream" | "Random"
+	}]
 }
 
 #ContainerDependency: {

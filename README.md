@@ -444,6 +444,7 @@ manifest: schema.#Manifest & {
     managed: {
       file: "secrets.enc.yaml"
       kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/xxx"
+      kmsKeyRegion: "us-east-1" // optional; defaults to deployment region
       ssmPrefix: "/myapp/prod"
     }
   }

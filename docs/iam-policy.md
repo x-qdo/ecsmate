@@ -9,7 +9,7 @@ Minimal IAM policies following the principle of least privilege.
 | ECS | Task definitions, services, clusters |
 | Application Auto Scaling | Service scaling policies |
 | ELBv2 | Target groups, listener rules |
-| CloudWatch Logs | Log group management |
+| CloudWatch Logs | Log group and subscription filter management |
 | EventBridge Scheduler | Scheduled tasks |
 | IAM | Role management for scheduler |
 | SSM | Parameter resolution and managed secrets |
@@ -83,8 +83,12 @@ Required for all ecsmate operations (`diff`, `apply`, `status`, `rollback`):
       "Action": [
         "logs:CreateLogGroup",
         "logs:DescribeLogGroups",
+        "logs:DescribeSubscriptionFilters",
+        "logs:ListTagsForResource",
         "logs:DeleteLogGroup",
+        "logs:DeleteSubscriptionFilter",
         "logs:PutRetentionPolicy",
+        "logs:PutSubscriptionFilter",
         "logs:TagResource",
         "logs:GetLogEvents"
       ],
@@ -222,6 +226,8 @@ For `diff`, `status`, and `validate` commands only:
       "Effect": "Allow",
       "Action": [
         "logs:DescribeLogGroups",
+        "logs:DescribeSubscriptionFilters",
+        "logs:ListTagsForResource",
         "logs:GetLogEvents"
       ],
       "Resource": "*"
@@ -365,8 +371,12 @@ Replace placeholders with actual values:
       "Action": [
         "logs:CreateLogGroup",
         "logs:DescribeLogGroups",
+        "logs:DescribeSubscriptionFilters",
+        "logs:ListTagsForResource",
         "logs:DeleteLogGroup",
+        "logs:DeleteSubscriptionFilter",
         "logs:PutRetentionPolicy",
+        "logs:PutSubscriptionFilter",
         "logs:TagResource",
         "logs:GetLogEvents"
       ],
