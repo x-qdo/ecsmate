@@ -81,6 +81,9 @@ func TestResolveSSMReferences(t *testing.T) {
 			"/app/sg-1":      "sg-def456",
 			"/app/image-tag": "v1.2.3",
 			"/app/db-secret": "arn:aws:secretsmanager:us-east-1:123:secret:db",
+			"/app/slack":     "arn:aws:lambda:us-east-1:123:function:slack",
+			"/app/pattern":   "?ERROR ?Error ?Exception",
+			"/app/log-role":  "arn:aws:iam::123:role/log-delivery",
 		},
 	}
 
@@ -100,6 +103,19 @@ func TestResolveSSMReferences(t *testing.T) {
 						},
 						Secrets: []Secret{
 							{Name: "DB_PASSWORD", ValueFrom: "{{ssm:/app/db-secret}}"},
+						},
+						LogConfiguration: &LogConfiguration{
+							Options: map[string]string{
+								"awslogs-group": "/ecs/test-app",
+							},
+							SubscriptionFilters: []SubscriptionFilter{
+								{
+									Name:           "slack-error-forwarder",
+									DestinationArn: "{{ssm:/app/slack}}",
+									FilterPattern:  "{{ssm:/app/pattern}}",
+									RoleArn:        "{{ssm:/app/log-role}}",
+								},
+							},
 						},
 					},
 				},
@@ -133,6 +149,16 @@ func TestResolveSSMReferences(t *testing.T) {
 
 	if td.ContainerDefinitions[0].Secrets[0].ValueFrom != "arn:aws:secretsmanager:us-east-1:123:secret:db" {
 		t.Errorf("Secret ValueFrom not resolved, got %q", td.ContainerDefinitions[0].Secrets[0].ValueFrom)
+	}
+	filter := td.ContainerDefinitions[0].LogConfiguration.SubscriptionFilters[0]
+	if filter.DestinationArn != "arn:aws:lambda:us-east-1:123:function:slack" {
+		t.Errorf("subscription filter destinationArn not resolved, got %q", filter.DestinationArn)
+	}
+	if filter.FilterPattern != "?ERROR ?Error ?Exception" {
+		t.Errorf("subscription filter pattern not resolved, got %q", filter.FilterPattern)
+	}
+	if filter.RoleArn != "arn:aws:iam::123:role/log-delivery" {
+		t.Errorf("subscription filter roleArn not resolved, got %q", filter.RoleArn)
 	}
 
 	svc := manifest.Services["web"]
@@ -216,6 +242,13 @@ func TestCollectSSMReferences_AllTypes(t *testing.T) {
 							Options: map[string]string{
 								"key": "{{ssm:/td/log-opt}}",
 							},
+							SubscriptionFilters: []SubscriptionFilter{
+								{
+									DestinationArn: "{{ssm:/td/sub-destination}}",
+									FilterPattern:  "{{ssm:/td/sub-pattern}}",
+									RoleArn:        "{{ssm:/td/sub-role}}",
+								},
+							},
 						},
 					},
 				},
@@ -277,6 +310,7 @@ func TestCollectSSMReferences_AllTypes(t *testing.T) {
 
 	expectedRefs := []string{
 		"/td/exec-role", "/td/task-role", "/td/image", "/td/env", "/td/secret", "/td/log-opt",
+		"/td/sub-destination", "/td/sub-pattern", "/td/sub-role",
 		"/merged/base", "/merged/exec-role", "/merged/image", "/merged/env",
 		"/remote/arn",
 		"/svc/cluster", "/svc/subnet", "/svc/sg", "/svc/tg",

@@ -39,6 +39,15 @@ type CreateLogGroupInput struct {
 	Tags     map[string]string
 }
 
+type PutSubscriptionFilterInput struct {
+	LogGroupName   string
+	Name           string
+	DestinationArn string
+	FilterPattern  string
+	RoleArn        string
+	Distribution   string
+}
+
 func (c *CloudWatchLogsClient) CreateLogGroup(ctx context.Context, input *CreateLogGroupInput) error {
 	log.Debug("creating CloudWatch log group", "name", input.Name)
 
@@ -145,6 +154,103 @@ func (c *CloudWatchLogsClient) TagLogGroup(ctx context.Context, logGroupName str
 		return fmt.Errorf("failed to tag log group %s: %w", logGroupName, err)
 	}
 
+	return nil
+}
+
+func (c *CloudWatchLogsClient) ListLogGroupTags(ctx context.Context, logGroupName string) (map[string]string, error) {
+	log.Debug("listing log group tags", "name", logGroupName)
+
+	lg, err := c.DescribeLogGroup(ctx, logGroupName)
+	if err != nil {
+		return nil, err
+	}
+	if lg == nil {
+		return nil, fmt.Errorf("log group %s not found", logGroupName)
+	}
+
+	out, err := c.client.ListTagsForResource(ctx, &cloudwatchlogs.ListTagsForResourceInput{
+		ResourceArn: lg.Arn,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tags for log group %s: %w", logGroupName, err)
+	}
+
+	return out.Tags, nil
+}
+
+func (c *CloudWatchLogsClient) DescribeSubscriptionFilters(ctx context.Context, logGroupName string) ([]types.SubscriptionFilter, error) {
+	log.Debug("describing subscription filters", "logGroup", logGroupName)
+
+	var filters []types.SubscriptionFilter
+	var nextToken *string
+
+	for {
+		out, err := c.client.DescribeSubscriptionFilters(ctx, &cloudwatchlogs.DescribeSubscriptionFiltersInput{
+			LogGroupName: aws.String(logGroupName),
+			NextToken:    nextToken,
+		})
+		if err != nil {
+			var notFound *types.ResourceNotFoundException
+			if errors.As(err, &notFound) {
+				log.Debug("log group not found while describing subscription filters", "logGroup", logGroupName)
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to describe subscription filters for %s: %w", logGroupName, err)
+		}
+
+		filters = append(filters, out.SubscriptionFilters...)
+		if out.NextToken == nil || *out.NextToken == "" {
+			break
+		}
+		nextToken = out.NextToken
+	}
+
+	return filters, nil
+}
+
+func (c *CloudWatchLogsClient) PutSubscriptionFilter(ctx context.Context, input *PutSubscriptionFilterInput) error {
+	log.Debug("putting subscription filter", "logGroup", input.LogGroupName, "name", input.Name)
+
+	putInput := &cloudwatchlogs.PutSubscriptionFilterInput{
+		LogGroupName:   aws.String(input.LogGroupName),
+		FilterName:     aws.String(input.Name),
+		DestinationArn: aws.String(input.DestinationArn),
+		FilterPattern:  aws.String(input.FilterPattern),
+	}
+
+	if input.RoleArn != "" {
+		putInput.RoleArn = aws.String(input.RoleArn)
+	}
+	if input.Distribution != "" {
+		putInput.Distribution = types.Distribution(input.Distribution)
+	}
+
+	_, err := c.client.PutSubscriptionFilter(ctx, putInput)
+	if err != nil {
+		return fmt.Errorf("failed to put subscription filter %s on %s: %w", input.Name, input.LogGroupName, err)
+	}
+
+	log.Info("put subscription filter", "logGroup", input.LogGroupName, "name", input.Name)
+	return nil
+}
+
+func (c *CloudWatchLogsClient) DeleteSubscriptionFilter(ctx context.Context, logGroupName, filterName string) error {
+	log.Debug("deleting subscription filter", "logGroup", logGroupName, "name", filterName)
+
+	_, err := c.client.DeleteSubscriptionFilter(ctx, &cloudwatchlogs.DeleteSubscriptionFilterInput{
+		LogGroupName: aws.String(logGroupName),
+		FilterName:   aws.String(filterName),
+	})
+	if err != nil {
+		var notFound *types.ResourceNotFoundException
+		if errors.As(err, &notFound) {
+			log.Debug("subscription filter not found", "logGroup", logGroupName, "name", filterName)
+			return nil
+		}
+		return fmt.Errorf("failed to delete subscription filter %s on %s: %w", filterName, logGroupName, err)
+	}
+
+	log.Info("deleted subscription filter", "logGroup", logGroupName, "name", filterName)
 	return nil
 }
 

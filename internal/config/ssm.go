@@ -90,6 +90,11 @@ func collectFromTaskDef(td *TaskDefinition, refs map[string]struct{}) {
 			for _, v := range cd.LogConfiguration.Options {
 				collectFromString(v, refs)
 			}
+			for _, filter := range cd.LogConfiguration.SubscriptionFilters {
+				collectFromString(filter.DestinationArn, refs)
+				collectFromString(filter.FilterPattern, refs)
+				collectFromString(filter.RoleArn, refs)
+			}
 		}
 	}
 
@@ -215,6 +220,11 @@ func replaceInTaskDef(td *TaskDefinition, values map[string]string) {
 		if cd.LogConfiguration != nil {
 			for k, v := range cd.LogConfiguration.Options {
 				cd.LogConfiguration.Options[k] = replaceInString(v, values)
+			}
+			for j := range cd.LogConfiguration.SubscriptionFilters {
+				cd.LogConfiguration.SubscriptionFilters[j].DestinationArn = replaceInString(cd.LogConfiguration.SubscriptionFilters[j].DestinationArn, values)
+				cd.LogConfiguration.SubscriptionFilters[j].FilterPattern = replaceInString(cd.LogConfiguration.SubscriptionFilters[j].FilterPattern, values)
+				cd.LogConfiguration.SubscriptionFilters[j].RoleArn = replaceInString(cd.LogConfiguration.SubscriptionFilters[j].RoleArn, values)
 			}
 		}
 	}
