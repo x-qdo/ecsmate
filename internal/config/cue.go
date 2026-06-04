@@ -34,11 +34,16 @@ func NewCUELoader() *CUELoader {
 func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setValues []string) (cue.Value, error) {
 	log.Debug("loading manifest", "path", manifestPath, "valueFiles", valueFiles, "setValues", setValues)
 
+	manifestAbsPath, err := filepath.Abs(manifestPath)
+	if err != nil {
+		return cue.Value{}, fmt.Errorf("failed to resolve manifest path %s: %w", manifestPath, err)
+	}
+
 	// Build load configuration
 	cfg := &load.Config{
-		Dir: manifestPath,
+		Dir: manifestAbsPath,
 	}
-	moduleRoot, modulePath, err := findModuleRoot(manifestPath)
+	moduleRoot, modulePath, err := findModuleRoot(manifestAbsPath)
 	if err != nil {
 		return cue.Value{}, err
 	}
@@ -58,7 +63,7 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	var files []string
 
 	// Find all CUE files in the manifest directory
-	entries, err := os.ReadDir(manifestPath)
+	entries, err := os.ReadDir(manifestAbsPath)
 	if err != nil {
 		return cue.Value{}, fmt.Errorf("failed to read manifest directory: %w", err)
 	}
@@ -70,7 +75,7 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	}
 
 	// Add taskdefs directory if exists
-	taskdefsPath := filepath.Join(manifestPath, "taskdefs")
+	taskdefsPath := filepath.Join(manifestAbsPath, "taskdefs")
 	if stat, err := os.Stat(taskdefsPath); err == nil && stat.IsDir() {
 		taskdefEntries, err := os.ReadDir(taskdefsPath)
 		if err == nil {
@@ -84,7 +89,7 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 
 	// Add values directory files directly in values/ (not subdirectories).
 	// Subdirectory files (envs/*.cue, tenants/*.cue) must be explicitly specified via -f flag.
-	valuesPath := filepath.Join(manifestPath, "values")
+	valuesPath := filepath.Join(manifestAbsPath, "values")
 	if stat, err := os.Stat(valuesPath); err == nil && stat.IsDir() {
 		valuesEntries, err := os.ReadDir(valuesPath)
 		if err == nil {
@@ -99,12 +104,12 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 
 	// Load value files
 	for _, vf := range valueFiles {
-		absPath, err := filepath.Abs(vf)
+		absPath, err := resolveValueFilePath(manifestAbsPath, vf)
 		if err != nil {
 			return cue.Value{}, fmt.Errorf("failed to resolve value file path %s: %w", vf, err)
 		}
 		// If the value file is within the manifest directory, use relative path
-		if relPath, err := filepath.Rel(manifestPath, absPath); err == nil && !strings.HasPrefix(relPath, "..") {
+		if relPath, ok := relativePathInDir(manifestAbsPath, absPath); ok {
 			files = append(files, relPath)
 		} else {
 			// Otherwise, use absolute path
@@ -162,6 +167,44 @@ func (l *CUELoader) LoadManifest(manifestPath string, valueFiles []string, setVa
 	}
 
 	return value, nil
+}
+
+func resolveValueFilePath(manifestAbsPath, valueFile string) (string, error) {
+	absPath, err := filepath.Abs(valueFile)
+	if err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(valueFile) {
+		return absPath, nil
+	}
+
+	if _, err := os.Stat(absPath); err == nil || !os.IsNotExist(err) {
+		return absPath, nil
+	}
+
+	manifestValuePath, err := filepath.Abs(filepath.Join(manifestAbsPath, valueFile))
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(manifestValuePath); err == nil {
+		return manifestValuePath, nil
+	}
+
+	return absPath, nil
+}
+
+func relativePathInDir(baseDir, targetPath string) (string, bool) {
+	relPath, err := filepath.Rel(baseDir, targetPath)
+	if err != nil {
+		return "", false
+	}
+	if relPath == "." {
+		return relPath, true
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+	return relPath, true
 }
 
 func findModuleRoot(start string) (string, string, error) {
@@ -298,12 +341,10 @@ func (l *CUELoader) applySetValues(value cue.Value, setValues []string) (cue.Val
 
 		log.Debug("applying set override", "key", key, "value", val)
 
-		// Parse the path (handles hidden fields prefixed with _)
-		path := parseCUEPath(key)
-
-		// Check if the field exists
-		existing := result.LookupPath(path)
-		if !existing.Exists() {
+		// Resolve the path against the existing value. Hidden fields are
+		// package-qualified in CUE, so reuse the selectors from the value.
+		path, ok := findExistingCUEPath(result, key)
+		if !ok {
 			return cue.Value{}, fmt.Errorf("--set %s: field does not exist\n  Available top-level fields: %s", key, listTopLevelFields(result))
 		}
 
@@ -324,18 +365,45 @@ func (l *CUELoader) applySetValues(value cue.Value, setValues []string) (cue.Val
 	return result, nil
 }
 
-// parseCUEPath parses a dot-separated path into CUE selectors, handling hidden fields
-func parseCUEPath(path string) cue.Path {
+// findExistingCUEPath resolves a dot-separated path using selectors from the value.
+func findExistingCUEPath(value cue.Value, path string) (cue.Path, bool) {
 	parts := strings.Split(path, ".")
-	selectors := make([]cue.Selector, len(parts))
-	for i, part := range parts {
-		if strings.HasPrefix(part, "_") {
-			selectors[i] = cue.Hid(part, "_")
-		} else {
-			selectors[i] = cue.Str(part)
+	selectors := make([]cue.Selector, 0, len(parts))
+	current := value
+
+	for _, part := range parts {
+		iter, err := current.Fields(cue.All())
+		if err != nil {
+			return cue.Path{}, false
+		}
+
+		found := false
+		for iter.Next() {
+			selector := iter.Selector()
+			if selectorName(selector) != part {
+				continue
+			}
+
+			selectors = append(selectors, selector)
+			current = iter.Value()
+			found = true
+			break
+		}
+
+		if !found {
+			return cue.Path{}, false
 		}
 	}
-	return cue.MakePath(selectors...)
+
+	return cue.MakePath(selectors...), true
+}
+
+func selectorName(selector cue.Selector) string {
+	name := selector.String()
+	if unquoted, err := strconv.Unquote(name); err == nil {
+		return unquoted
+	}
+	return name
 }
 
 // listTopLevelFields returns a comma-separated list of top-level field names for error messages

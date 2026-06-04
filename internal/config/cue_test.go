@@ -70,23 +70,7 @@ manifest: schema.#Manifest & {
 				t.Fatal(err)
 			}
 
-			// Create a symlink to the project's cue.mod so schema imports work
-			cueModLink := filepath.Join(tmpDir, "cue.mod")
-			projectCueMod := filepath.Join(projectRoot, "cue.mod")
-			if err := os.Symlink(projectCueMod, cueModLink); err != nil {
-				t.Fatalf("failed to symlink cue.mod: %v", err)
-			}
-
-			// Also need access to pkg/cue for the schema
-			pkgDir := filepath.Join(tmpDir, "pkg")
-			if err := os.MkdirAll(pkgDir, 0755); err != nil {
-				t.Fatal(err)
-			}
-			pkgCueLink := filepath.Join(pkgDir, "cue")
-			projectPkgCue := filepath.Join(projectRoot, "pkg", "cue")
-			if err := os.Symlink(projectPkgCue, pkgCueLink); err != nil {
-				t.Fatalf("failed to symlink pkg/cue: %v", err)
-			}
+			setupTestCueModule(t, tmpDir, projectRoot)
 
 			// Test validation
 			loader := NewCUELoader()
@@ -125,6 +109,156 @@ func findProjectRoot() (string, error) {
 	}
 
 	return "", os.ErrNotExist
+}
+
+func TestRelativePathInDir(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "manifest")
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		targetPath string
+		wantPath   string
+		wantInside bool
+	}{
+		{
+			name:       "nested file inside manifest",
+			targetPath: filepath.Join(baseDir, "values", "prod.cue"),
+			wantPath:   filepath.Join("values", "prod.cue"),
+			wantInside: true,
+		},
+		{
+			name:       "file name starts with dot dot",
+			targetPath: filepath.Join(baseDir, "..values.cue"),
+			wantPath:   "..values.cue",
+			wantInside: true,
+		},
+		{
+			name:       "sibling directory outside manifest",
+			targetPath: filepath.Join(filepath.Dir(baseDir), "manifest-other", "prod.cue"),
+			wantInside: false,
+		},
+		{
+			name:       "parent directory outside manifest",
+			targetPath: filepath.Join(filepath.Dir(baseDir), "prod.cue"),
+			wantInside: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotInside := relativePathInDir(baseDir, tt.targetPath)
+			if gotInside != tt.wantInside {
+				t.Fatalf("inside: got %v, want %v", gotInside, tt.wantInside)
+			}
+			if gotPath != tt.wantPath {
+				t.Fatalf("path: got %q, want %q", gotPath, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestResolveValueFilePath(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "manifest")
+	valuePath := filepath.Join(baseDir, "values", "prod.cue")
+	if err := os.MkdirAll(filepath.Dir(valuePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(valuePath, []byte("package test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("absolute path", func(t *testing.T) {
+		got, err := resolveValueFilePath(baseDir, valuePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != valuePath {
+			t.Fatalf("got %q, want %q", got, valuePath)
+		}
+	})
+
+	t.Run("manifest relative fallback", func(t *testing.T) {
+		got, err := resolveValueFilePath(baseDir, filepath.Join("values", "prod.cue"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != valuePath {
+			t.Fatalf("got %q, want %q", got, valuePath)
+		}
+	})
+
+	t.Run("missing path stays current directory relative", func(t *testing.T) {
+		relPath := filepath.Join("values", "missing.cue")
+		got, err := resolveValueFilePath(baseDir, relPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := filepath.Abs(relPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func setupTestCueModule(t *testing.T, tmpDir, projectRoot string) {
+	t.Helper()
+
+	if err := copyDir(filepath.Join(projectRoot, "cue.mod"), filepath.Join(tmpDir, "cue.mod")); err != nil {
+		t.Fatalf("failed to copy cue.mod: %v", err)
+	}
+
+	if err := copyDir(filepath.Join(projectRoot, "pkg", "cue"), filepath.Join(tmpDir, "pkg", "cue")); err != nil {
+		t.Fatalf("failed to copy pkg/cue: %v", err)
+	}
+}
+
+func copyDir(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := copyFile(srcPath, dstPath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(dst, data, info.Mode().Perm())
 }
 
 func TestApplySetValues_OverridesDefaultValues(t *testing.T) {
@@ -184,6 +318,44 @@ func TestApplySetValues_HiddenFields(t *testing.T) {
 	}
 	if ns != "overridden" {
 		t.Errorf("expected namespace 'overridden', got '%s'", ns)
+	}
+}
+
+func TestApplySetValues_PackageHiddenFields(t *testing.T) {
+	loader := NewCUELoader()
+
+	base := loader.ctx.CompileString(`
+		package test
+
+		_values: {
+			image: {
+				tag: string | *"latest"
+			}
+		}
+	`)
+	if base.Err() != nil {
+		t.Fatalf("failed to compile base: %v", base.Err())
+	}
+
+	result, err := loader.applySetValues(base, []string{"_values.image.tag=v2"})
+	if err != nil {
+		t.Fatalf("applySetValues failed: %v", err)
+	}
+
+	tagPath, ok := findExistingCUEPath(result, "_values.image.tag")
+	if !ok {
+		t.Fatal("failed to resolve _values.image.tag")
+	}
+	tagVal := result.LookupPath(tagPath)
+	if tagVal.Err() != nil {
+		t.Fatalf("failed to lookup _values.image.tag: %v", tagVal.Err())
+	}
+	tag, err := tagVal.String()
+	if err != nil {
+		t.Fatalf("failed to get string value: %v", err)
+	}
+	if tag != "v2" {
+		t.Errorf("expected tag 'v2', got '%s'", tag)
 	}
 }
 
@@ -329,21 +501,7 @@ manifest: schema.#Manifest & {
 		t.Fatal(err)
 	}
 
-	cueModLink := filepath.Join(tmpDir, "cue.mod")
-	projectCueMod := filepath.Join(projectRoot, "cue.mod")
-	if err := os.Symlink(projectCueMod, cueModLink); err != nil {
-		t.Fatalf("failed to symlink cue.mod: %v", err)
-	}
-
-	pkgDir := filepath.Join(tmpDir, "pkg")
-	if err := os.MkdirAll(pkgDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pkgCueLink := filepath.Join(pkgDir, "cue")
-	projectPkgCue := filepath.Join(projectRoot, "pkg", "cue")
-	if err := os.Symlink(projectPkgCue, pkgCueLink); err != nil {
-		t.Fatalf("failed to symlink pkg/cue: %v", err)
-	}
+	setupTestCueModule(t, tmpDir, projectRoot)
 
 	loader := NewCUELoader()
 	value, err := loader.LoadManifest(tmpDir, nil, nil)
@@ -444,21 +602,7 @@ manifest: schema.#Manifest & {
 		t.Fatal(err)
 	}
 
-	cueModLink := filepath.Join(tmpDir, "cue.mod")
-	projectCueMod := filepath.Join(projectRoot, "cue.mod")
-	if err := os.Symlink(projectCueMod, cueModLink); err != nil {
-		t.Fatalf("failed to symlink cue.mod: %v", err)
-	}
-
-	pkgDir := filepath.Join(tmpDir, "pkg")
-	if err := os.MkdirAll(pkgDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pkgCueLink := filepath.Join(pkgDir, "cue")
-	projectPkgCue := filepath.Join(projectRoot, "pkg", "cue")
-	if err := os.Symlink(projectPkgCue, pkgCueLink); err != nil {
-		t.Fatalf("failed to symlink pkg/cue: %v", err)
-	}
+	setupTestCueModule(t, tmpDir, projectRoot)
 
 	loader := NewCUELoader()
 	value, err := loader.LoadManifest(tmpDir, nil, nil)
@@ -516,21 +660,7 @@ manifest: schema.#Manifest & {
 		t.Fatal(err)
 	}
 
-	cueModLink := filepath.Join(tmpDir, "cue.mod")
-	projectCueMod := filepath.Join(projectRoot, "cue.mod")
-	if err := os.Symlink(projectCueMod, cueModLink); err != nil {
-		t.Fatalf("failed to symlink cue.mod: %v", err)
-	}
-
-	pkgDir := filepath.Join(tmpDir, "pkg")
-	if err := os.MkdirAll(pkgDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pkgCueLink := filepath.Join(pkgDir, "cue")
-	projectPkgCue := filepath.Join(projectRoot, "pkg", "cue")
-	if err := os.Symlink(projectPkgCue, pkgCueLink); err != nil {
-		t.Fatalf("failed to symlink pkg/cue: %v", err)
-	}
+	setupTestCueModule(t, tmpDir, projectRoot)
 
 	loader := NewCUELoader()
 	value, err := loader.LoadManifest(tmpDir, nil, nil)
