@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -279,7 +280,8 @@ func TestLogGroupManagerApply_ReconcilesSubscriptionFiltersOnNoop(t *testing.T) 
 	if len(client.deletedSubscriptions) != 0 {
 		t.Fatalf("expected no delete calls for unrelated filters, got %v", client.deletedSubscriptions)
 	}
-	if client.tags["/ecs/app"][managedSubscriptionFiltersTag] != `["changed","matching","missing"]` {
+	expectedManagedTag := mustEncodeManagedSubscriptionFilterNames(t, []string{"changed", "matching", "missing"})
+	if client.tags["/ecs/app"][managedSubscriptionFiltersTag] != expectedManagedTag {
 		t.Fatalf("unexpected managed subscription tag: %q", client.tags["/ecs/app"][managedSubscriptionFiltersTag])
 	}
 }
@@ -315,7 +317,8 @@ func TestLogGroupManagerApply_CreatesSubscriptionFiltersAfterLogGroupCreate(t *t
 	if !reflect.DeepEqual(client.calls, expectedCalls) {
 		t.Fatalf("unexpected calls:\n got: %#v\nwant: %#v", client.calls, expectedCalls)
 	}
-	if client.tags["/ecs/new"][managedSubscriptionFiltersTag] != `["slack-error-forwarder"]` {
+	expectedManagedTag := mustEncodeManagedSubscriptionFilterNames(t, []string{"slack-error-forwarder"})
+	if client.tags["/ecs/new"][managedSubscriptionFiltersTag] != expectedManagedTag {
 		t.Fatalf("unexpected managed subscription tag: %q", client.tags["/ecs/new"][managedSubscriptionFiltersTag])
 	}
 }
@@ -324,7 +327,7 @@ func TestLogGroupManagerApply_DeletesPreviouslyManagedSubscriptionFilters(t *tes
 	client := newMockLogGroupClient()
 	client.logGroups["/ecs/app"] = &types.LogGroup{LogGroupName: aws.String("/ecs/app")}
 	client.tags["/ecs/app"] = map[string]string{
-		managedSubscriptionFiltersTag: `["removed","already-gone"]`,
+		managedSubscriptionFiltersTag: mustEncodeManagedSubscriptionFilterNames(t, []string{"removed", "already-gone"}),
 	}
 	client.subscriptionFilters["/ecs/app"] = []types.SubscriptionFilter{
 		{
@@ -364,7 +367,8 @@ func TestLogGroupManagerApply_DeletesPreviouslyManagedSubscriptionFilters(t *tes
 	if !reflect.DeepEqual(client.deletedSubscriptions, []string{"/ecs/app/removed"}) {
 		t.Fatalf("unexpected deleted subscriptions: %#v", client.deletedSubscriptions)
 	}
-	if client.tags["/ecs/app"][managedSubscriptionFiltersTag] != `[]` {
+	expectedManagedTag := mustEncodeManagedSubscriptionFilterNames(t, nil)
+	if client.tags["/ecs/app"][managedSubscriptionFiltersTag] != expectedManagedTag {
 		t.Fatalf("expected managed subscription tag to be cleared, got %q", client.tags["/ecs/app"][managedSubscriptionFiltersTag])
 	}
 }
@@ -394,4 +398,57 @@ func TestLogGroupManagerCreate_FiltersReservedStateTagFromUserTags(t *testing.T)
 	if _, exists := client.tags["/ecs/new"][managedSubscriptionFiltersTag]; exists {
 		t.Fatalf("reserved state tag should not be copied from user tags: %#v", client.tags["/ecs/new"])
 	}
+}
+
+func TestLogGroupManagerBuildResource_RejectsInvalidTagValueBeforeDiscovery(t *testing.T) {
+	client := newMockLogGroupClient()
+	manager := NewLogGroupManager(client)
+	spec := &LogGroupSpec{
+		Name: "/ecs/app",
+		Tags: map[string]string{
+			"bad": `["json-is-not-a-valid-cloudwatch-tag-value"]`,
+		},
+	}
+
+	_, err := manager.BuildResource(context.Background(), spec)
+	if err == nil {
+		t.Fatal("expected invalid tag value to fail validation")
+	}
+	if !strings.Contains(err.Error(), "CloudWatch Logs tag character constraints") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.calls) != 0 {
+		t.Fatalf("expected no AWS discovery calls before tag validation, got %#v", client.calls)
+	}
+}
+
+func TestParseManagedSubscriptionFilterNames_RequiresEncodedTagValue(t *testing.T) {
+	parsed := parseManagedSubscriptionFilterNames(map[string]string{
+		managedSubscriptionFiltersTag: `["raw-json-is-invalid"]`,
+	})
+	if len(parsed) != 0 {
+		t.Fatalf("raw JSON state must not be parsed, got %#v", parsed)
+	}
+}
+
+func TestValidateLogGroupTags(t *testing.T) {
+	if err := validateLogGroupTags(map[string]string{"ok": "Letters numbers 123 _.:/=+-@"}); err != nil {
+		t.Fatalf("expected valid CloudWatch tag to pass: %v", err)
+	}
+	if err := validateLogGroupTags(map[string]string{"bad": `["json"]`}); err == nil {
+		t.Fatal("expected JSON-looking tag value to fail validation")
+	}
+	if err := validateLogGroupTags(map[string]string{"": "value"}); err == nil {
+		t.Fatal("expected empty tag key to fail validation")
+	}
+}
+
+func mustEncodeManagedSubscriptionFilterNames(t *testing.T, names []string) string {
+	t.Helper()
+
+	value, err := encodeManagedSubscriptionFilterNames(names)
+	if err != nil {
+		t.Fatalf("failed to encode managed subscription filter names: %v", err)
+	}
+	return value
 }

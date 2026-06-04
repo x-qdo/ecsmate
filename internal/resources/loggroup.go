@@ -2,9 +2,12 @@ package resources
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
+	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
@@ -22,7 +25,8 @@ const (
 	LogGroupActionDelete LogGroupAction = "DELETE"
 	LogGroupActionNoop   LogGroupAction = "NOOP"
 
-	managedSubscriptionFiltersTag = "ecsmate:ManagedSubscriptionFilters"
+	managedSubscriptionFiltersTag       = "ecsmate:ManagedSubscriptionFilters"
+	managedSubscriptionFiltersTagPrefix = "v1:"
 )
 
 // LogGroupSpec represents the desired state for a log group (extracted from LogConfiguration)
@@ -155,6 +159,10 @@ func (m *LogGroupManager) BuildResource(ctx context.Context, spec *LogGroupSpec)
 		Desired: spec,
 	}
 
+	if err := validateLogGroupTags(userLogGroupTags(spec.Tags)); err != nil {
+		return nil, err
+	}
+
 	if err := m.discoverLogGroup(ctx, resource); err != nil {
 		log.Debug("failed to discover log group", "name", spec.Name, "error", err)
 	}
@@ -221,10 +229,15 @@ func (resource *LogGroupResource) determineAction() {
 func (m *LogGroupManager) Create(ctx context.Context, resource *LogGroupResource) error {
 	log.Info("creating log group", "name", resource.Desired.Name)
 
+	tags := userLogGroupTags(resource.Desired.Tags)
+	if err := validateLogGroupTags(tags); err != nil {
+		return err
+	}
+
 	if err := m.client.CreateLogGroup(ctx, &awsclient.CreateLogGroupInput{
 		Name:     resource.Desired.Name,
 		KMSKeyID: resource.Desired.KMSKeyID,
-		Tags:     userLogGroupTags(resource.Desired.Tags),
+		Tags:     tags,
 	}); err != nil {
 		return err
 	}
@@ -242,6 +255,11 @@ func (m *LogGroupManager) Create(ctx context.Context, resource *LogGroupResource
 func (m *LogGroupManager) Update(ctx context.Context, resource *LogGroupResource) error {
 	log.Info("updating log group", "name", resource.Desired.Name)
 
+	tags := userLogGroupTags(resource.Desired.Tags)
+	if err := validateLogGroupTags(tags); err != nil {
+		return err
+	}
+
 	// Update retention policy
 	if resource.Desired.RetentionInDays > 0 {
 		if err := m.client.SetRetentionPolicy(ctx, resource.Desired.Name, resource.Desired.RetentionInDays); err != nil {
@@ -250,7 +268,7 @@ func (m *LogGroupManager) Update(ctx context.Context, resource *LogGroupResource
 	}
 
 	// Update tags if needed
-	if tags := userLogGroupTags(resource.Desired.Tags); len(tags) > 0 {
+	if len(tags) > 0 {
 		if err := m.client.TagLogGroup(ctx, resource.Desired.Name, tags); err != nil {
 			return fmt.Errorf("failed to update tags: %w", err)
 		}
@@ -315,6 +333,11 @@ func (m *LogGroupManager) reconcileSubscriptionFilters(ctx context.Context, reso
 		return nil
 	}
 
+	managedStateTags, err := managedSubscriptionFilterStateTags(desiredNames)
+	if err != nil {
+		return err
+	}
+
 	currentFilters, err := m.client.DescribeSubscriptionFilters(ctx, logGroupName)
 	if err != nil {
 		return fmt.Errorf("failed to describe subscription filters: %w", err)
@@ -370,7 +393,7 @@ func (m *LogGroupManager) reconcileSubscriptionFilters(ctx context.Context, reso
 		}
 	}
 
-	if err := m.tagManagedSubscriptionFilters(ctx, logGroupName, desiredNames); err != nil {
+	if err := m.tagManagedSubscriptionFilters(ctx, logGroupName, managedStateTags); err != nil {
 		return err
 	}
 
@@ -393,19 +416,28 @@ func (m *LogGroupManager) currentManagedSubscriptionFilterNames(ctx context.Cont
 	return parseManagedSubscriptionFilterNames(resource.CurrentTags), nil
 }
 
-func (m *LogGroupManager) tagManagedSubscriptionFilters(ctx context.Context, logGroupName string, names []string) error {
-	value, err := encodeManagedSubscriptionFilterNames(names)
-	if err != nil {
-		return fmt.Errorf("failed to encode managed subscription filter state: %w", err)
-	}
-
-	if err := m.client.TagLogGroup(ctx, logGroupName, map[string]string{
-		managedSubscriptionFiltersTag: value,
-	}); err != nil {
+func (m *LogGroupManager) tagManagedSubscriptionFilters(ctx context.Context, logGroupName string, tags map[string]string) error {
+	if err := m.client.TagLogGroup(ctx, logGroupName, tags); err != nil {
 		return fmt.Errorf("failed to tag managed subscription filter state: %w", err)
 	}
 
 	return nil
+}
+
+func managedSubscriptionFilterStateTags(names []string) (map[string]string, error) {
+	value, err := encodeManagedSubscriptionFilterNames(names)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode managed subscription filter state: %w", err)
+	}
+
+	tags := map[string]string{
+		managedSubscriptionFiltersTag: value,
+	}
+	if err := validateLogGroupTags(tags); err != nil {
+		return nil, err
+	}
+
+	return tags, nil
 }
 
 func desiredSubscriptionFiltersByName(filters []SubscriptionFilterSpec) (map[string]SubscriptionFilterSpec, []string, error) {
@@ -442,8 +474,19 @@ func parseManagedSubscriptionFilterNames(tags map[string]string) map[string]stru
 		return names
 	}
 
+	if !strings.HasPrefix(value, managedSubscriptionFiltersTagPrefix) {
+		log.Warn("managed subscription filter state tag has unsupported encoding")
+		return names
+	}
+
+	decodedBytes, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, managedSubscriptionFiltersTagPrefix))
+	if err != nil {
+		log.Warn("failed to decode managed subscription filter state tag", "error", err)
+		return names
+	}
+
 	var decoded []string
-	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+	if err := json.Unmarshal(decodedBytes, &decoded); err != nil {
 		log.Warn("failed to parse managed subscription filter state tag", "error", err)
 		return names
 	}
@@ -464,7 +507,7 @@ func encodeManagedSubscriptionFilterNames(names []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(encoded), nil
+	return managedSubscriptionFiltersTagPrefix + base64.StdEncoding.EncodeToString(encoded), nil
 }
 
 func userLogGroupTags(tags map[string]string) map[string]string {
@@ -483,6 +526,39 @@ func userLogGroupTags(tags map[string]string) map[string]string {
 		return nil
 	}
 	return filtered
+}
+
+func validateLogGroupTags(tags map[string]string) error {
+	for key, value := range tags {
+		if len(key) < 1 || len(key) > 128 {
+			return fmt.Errorf("log group tag key %q length must be between 1 and 128 characters", key)
+		}
+		if len(value) > 256 {
+			return fmt.Errorf("log group tag %q value length must be less than or equal to 256 characters", key)
+		}
+		if !isValidCloudWatchLogsTagText(key) {
+			return fmt.Errorf("log group tag key %q must match CloudWatch Logs tag character constraints", key)
+		}
+		if !isValidCloudWatchLogsTagText(value) {
+			return fmt.Errorf("log group tag %q value %q must match CloudWatch Logs tag character constraints", key, value)
+		}
+	}
+	return nil
+}
+
+func isValidCloudWatchLogsTagText(value string) bool {
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.Is(unicode.Z, r) {
+			continue
+		}
+		switch r {
+		case '_', '.', ':', '/', '=', '+', '-', '@':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func subscriptionFilterMatches(desired SubscriptionFilterSpec, current types.SubscriptionFilter) bool {
