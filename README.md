@@ -445,12 +445,19 @@ manifest: schema.#Manifest & {
       file: "secrets.enc.yaml"
       kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/xxx"
       kmsKeyRegion: "us-east-1" // optional; defaults to deployment region
+      ssmKmsKeyId: "alias/myapp-ssm" // optional; must be in the deployment region
       ssmPrefix: "/myapp/prod"
     }
   }
   // ...
 }
 ```
+
+`kmsKeyArn`/`kmsKeyRegion` identify the KMS key used to decrypt the encrypted
+secrets file. `ssmKmsKeyId` controls the KMS key used by SSM Parameter Store for
+SecureString encryption. If `ssmKmsKeyId` is omitted, ecsmate reuses `kmsKeyArn`
+only when it is in the deployment region; otherwise it lets SSM use the
+region-local AWS-managed key.
 
 ### Using secrets in containers
 Reference managed secrets by key name in container definitions:

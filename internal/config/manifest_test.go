@@ -204,6 +204,7 @@ func TestParseManifest_ManagedSecretsKMSKeyRegion(t *testing.T) {
 				file: "secrets.enc.yaml"
 				kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/abc"
 				kmsKeyRegion: "us-east-1"
+				ssmKmsKeyId: "alias/app-ssm"
 				ssmPrefix: "/secret-app/prod"
 			}
 		}
@@ -224,6 +225,9 @@ func TestParseManifest_ManagedSecretsKMSKeyRegion(t *testing.T) {
 	}
 	if manifest.Secrets.Managed.KMSKeyRegion != "us-east-1" {
 		t.Fatalf("expected KMS key region us-east-1, got %q", manifest.Secrets.Managed.KMSKeyRegion)
+	}
+	if manifest.Secrets.Managed.SSMKMSKeyID != "alias/app-ssm" {
+		t.Fatalf("expected SSM KMS key ID alias/app-ssm, got %q", manifest.Secrets.Managed.SSMKMSKeyID)
 	}
 }
 

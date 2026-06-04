@@ -22,20 +22,29 @@ type SSMParamChange struct {
 	NewHash string
 }
 
-type SSMParamsManager struct {
-	client    *ssm.Client
-	managed   *config.ManagedSecrets
-	kmsKeyArn string
+type ssmParameterClient interface {
+	GetParameter(context.Context, *ssm.GetParameterInput, ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
+	PutParameter(context.Context, *ssm.PutParameterInput, ...func(*ssm.Options)) (*ssm.PutParameterOutput, error)
+	DeleteParameter(context.Context, *ssm.DeleteParameterInput, ...func(*ssm.Options)) (*ssm.DeleteParameterOutput, error)
+	ListTagsForResource(context.Context, *ssm.ListTagsForResourceInput, ...func(*ssm.Options)) (*ssm.ListTagsForResourceOutput, error)
+	AddTagsToResource(context.Context, *ssm.AddTagsToResourceInput, ...func(*ssm.Options)) (*ssm.AddTagsToResourceOutput, error)
+	DescribeParameters(context.Context, *ssm.DescribeParametersInput, ...func(*ssm.Options)) (*ssm.DescribeParametersOutput, error)
 }
 
-func NewSSMParamsManager(client *ssm.Client, managed *config.ManagedSecrets) *SSMParamsManager {
+type SSMParamsManager struct {
+	client      ssmParameterClient
+	managed     *config.ManagedSecrets
+	ssmKMSKeyID string
+}
+
+func NewSSMParamsManager(client ssmParameterClient, managed *config.ManagedSecrets) *SSMParamsManager {
 	if managed == nil {
 		return nil
 	}
 	return &SSMParamsManager{
-		client:    client,
-		managed:   managed,
-		kmsKeyArn: managed.KMSKeyArn,
+		client:      client,
+		managed:     managed,
+		ssmKMSKeyID: managed.SSMKMSKeyID,
 	}
 }
 
@@ -160,8 +169,8 @@ func (m *SSMParamsManager) Apply(ctx context.Context) error {
 			Overwrite: aws.Bool(true),
 		}
 
-		if m.kmsKeyArn != "" {
-			input.KeyId = aws.String(m.kmsKeyArn)
+		if m.ssmKMSKeyID != "" {
+			input.KeyId = aws.String(m.ssmKMSKeyID)
 		}
 
 		_, err = m.client.PutParameter(ctx, input)
