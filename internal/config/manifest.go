@@ -25,9 +25,10 @@ type SecretsConfig struct {
 }
 
 type ManagedSecretsConfig struct {
-	File      string
-	KMSKeyArn string
-	SSMPrefix string
+	File         string
+	KMSKeyArn    string
+	KMSKeyRegion string
+	SSMPrefix    string
 }
 
 type LogGroup struct {
@@ -464,6 +465,9 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 			}
 			if kmsArn, err := ExtractString(managed, "kmsKeyArn"); err == nil {
 				manifest.Secrets.Managed.KMSKeyArn = kmsArn
+			}
+			if kmsRegion, err := ExtractString(managed, "kmsKeyRegion"); err == nil {
+				manifest.Secrets.Managed.KMSKeyRegion = kmsRegion
 			}
 			if prefix, err := ExtractString(managed, "ssmPrefix"); err == nil {
 				manifest.Secrets.Managed.SSMPrefix = prefix

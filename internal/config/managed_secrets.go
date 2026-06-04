@@ -11,11 +11,12 @@ import (
 )
 
 type ManagedSecrets struct {
-	Decrypted map[string]string
-	SSMPrefix string
-	KMSKeyArn string
-	Region    string
-	AccountID string
+	Decrypted    map[string]string
+	SSMPrefix    string
+	KMSKeyArn    string
+	KMSKeyRegion string
+	Region       string
+	AccountID    string
 }
 
 func LoadManagedSecrets(ctx context.Context, manifestPath string, cfg *ManagedSecretsConfig, region string) (*ManagedSecrets, error) {
@@ -24,14 +25,15 @@ func LoadManagedSecrets(ctx context.Context, manifestPath string, cfg *ManagedSe
 	}
 
 	secretsPath := filepath.Join(manifestPath, cfg.File)
-	log.Debug("loading managed secrets", "path", secretsPath)
+	kmsRegion := managedSecretsKMSRegion(cfg, region)
+	log.Debug("loading managed secrets", "path", secretsPath, "kmsRegion", kmsRegion)
 
 	ef, err := secrets.LoadEncryptedFile(secretsPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load secrets file: %w", err)
 	}
 
-	kmsClient, err := aws.NewKMSClient(ctx, region)
+	kmsClient, err := aws.NewKMSClient(ctx, kmsRegion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KMS client: %w", err)
 	}
@@ -59,12 +61,20 @@ func LoadManagedSecrets(ctx context.Context, manifestPath string, cfg *ManagedSe
 	log.Info("loaded managed secrets", "count", len(decrypted))
 
 	return &ManagedSecrets{
-		Decrypted: decrypted,
-		SSMPrefix: cfg.SSMPrefix,
-		KMSKeyArn: cfg.KMSKeyArn,
-		Region:    region,
-		AccountID: accountID,
+		Decrypted:    decrypted,
+		SSMPrefix:    cfg.SSMPrefix,
+		KMSKeyArn:    cfg.KMSKeyArn,
+		KMSKeyRegion: kmsRegion,
+		Region:       region,
+		AccountID:    accountID,
 	}, nil
+}
+
+func managedSecretsKMSRegion(cfg *ManagedSecretsConfig, deploymentRegion string) string {
+	if cfg != nil && cfg.KMSKeyRegion != "" {
+		return cfg.KMSKeyRegion
+	}
+	return deploymentRegion
 }
 
 func (m *ManagedSecrets) BuildARNMap() map[string]string {

@@ -40,6 +40,23 @@ manifest: schema.#Manifest & {
 }`,
 			wantErr: false,
 		},
+		{
+			name: "valid managed secrets KMS key region",
+			cueFile: `package test
+import "github.com/x-qdo/ecsmate/pkg/cue:schema"
+manifest: schema.#Manifest & {
+	name: "test"
+	secrets: {
+		managed: {
+			file: "secrets.enc.yaml"
+			kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/abc"
+			kmsKeyRegion: "us-east-1"
+			ssmPrefix: "/test/prod"
+		}
+	}
+}`,
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

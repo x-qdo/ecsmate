@@ -195,6 +195,38 @@ func TestParseManifest_RemoteTaskDef(t *testing.T) {
 	}
 }
 
+func TestParseManifest_ManagedSecretsKMSKeyRegion(t *testing.T) {
+	ctx := cuecontext.New()
+	cueStr := `{
+		name: "secret-app"
+		secrets: {
+			managed: {
+				file: "secrets.enc.yaml"
+				kmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/abc"
+				kmsKeyRegion: "us-east-1"
+				ssmPrefix: "/secret-app/prod"
+			}
+		}
+	}`
+
+	value := ctx.CompileString(cueStr)
+	if value.Err() != nil {
+		t.Fatalf("failed to compile CUE: %v", value.Err())
+	}
+
+	manifest, err := ParseManifest(value)
+	if err != nil {
+		t.Fatalf("failed to parse manifest: %v", err)
+	}
+
+	if manifest.Secrets == nil || manifest.Secrets.Managed == nil {
+		t.Fatal("expected managed secrets config")
+	}
+	if manifest.Secrets.Managed.KMSKeyRegion != "us-east-1" {
+		t.Fatalf("expected KMS key region us-east-1, got %q", manifest.Secrets.Managed.KMSKeyRegion)
+	}
+}
+
 func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 	ctx := cuecontext.New()
 	cueStr := `{

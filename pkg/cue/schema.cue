@@ -13,9 +13,10 @@ package schema
 
 #SecretsConfig: {
 	managed?: {
-		file:      string
-		kmsKeyArn: string
-		ssmPrefix: string
+		file:          string
+		kmsKeyArn:     string
+		kmsKeyRegion?: string
+		ssmPrefix:     string
 	}
 	external?: [string]: string
 }
