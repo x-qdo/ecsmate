@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -145,9 +146,13 @@ func (c *CloudWatchLogsClient) TagLogGroup(ctx context.Context, logGroupName str
 	if lg == nil {
 		return fmt.Errorf("log group %s not found", logGroupName)
 	}
+	resourceArn, err := logGroupTagResourceArn(lg)
+	if err != nil {
+		return fmt.Errorf("failed to resolve tag ARN for log group %s: %w", logGroupName, err)
+	}
 
 	_, err = c.client.TagResource(ctx, &cloudwatchlogs.TagResourceInput{
-		ResourceArn: lg.Arn,
+		ResourceArn: aws.String(resourceArn),
 		Tags:        tags,
 	})
 	if err != nil {
@@ -167,15 +172,32 @@ func (c *CloudWatchLogsClient) ListLogGroupTags(ctx context.Context, logGroupNam
 	if lg == nil {
 		return nil, fmt.Errorf("log group %s not found", logGroupName)
 	}
+	resourceArn, err := logGroupTagResourceArn(lg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve tag ARN for log group %s: %w", logGroupName, err)
+	}
 
 	out, err := c.client.ListTagsForResource(ctx, &cloudwatchlogs.ListTagsForResourceInput{
-		ResourceArn: lg.Arn,
+		ResourceArn: aws.String(resourceArn),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tags for log group %s: %w", logGroupName, err)
 	}
 
 	return out.Tags, nil
+}
+
+func logGroupTagResourceArn(lg *types.LogGroup) (string, error) {
+	if lg == nil {
+		return "", fmt.Errorf("log group is nil")
+	}
+	if arn := aws.ToString(lg.LogGroupArn); arn != "" {
+		return arn, nil
+	}
+	if arn := aws.ToString(lg.Arn); arn != "" {
+		return strings.TrimSuffix(arn, ":*"), nil
+	}
+	return "", fmt.Errorf("log group ARN is empty")
 }
 
 func (c *CloudWatchLogsClient) DescribeSubscriptionFilters(ctx context.Context, logGroupName string) ([]types.SubscriptionFilter, error) {
