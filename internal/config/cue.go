@@ -335,7 +335,9 @@ func (l *CUELoader) applySetValues(value cue.Value, setValues []string) (cue.Val
 	for _, sv := range setValues {
 		parts := strings.SplitN(sv, "=", 2)
 		if len(parts) != 2 {
-			return cue.Value{}, fmt.Errorf("invalid --set format %q: expected key=value (e.g., --set images.tag=v1.0.0)", sv)
+			return cue.Value{}, fmt.Errorf(
+				"invalid --set format %q: expected key=value (e.g., --set images.tag=v1.0.0)", sv,
+			)
 		}
 		key, val := parts[0], parts[1]
 
@@ -345,11 +347,14 @@ func (l *CUELoader) applySetValues(value cue.Value, setValues []string) (cue.Val
 		// package-qualified in CUE, so reuse the selectors from the value.
 		path, ok := findExistingCUEPath(result, key)
 		if !ok {
-			return cue.Value{}, fmt.Errorf("--set %s: field does not exist\n  Available top-level fields: %s", key, listTopLevelFields(result))
+			return cue.Value{}, fmt.Errorf(
+				"--set %s: field does not exist\n  Available top-level fields: %s", key, listTopLevelFields(result),
+			)
 		}
 
+		target := result.LookupPath(path)
 		// Parse the value to proper CUE type
-		expr := formatCUEValue(val)
+		expr := formatSetValueForTarget(target, val)
 		cueVal := l.ctx.CompileString(expr)
 		if cueVal.Err() != nil {
 			return cue.Value{}, fmt.Errorf("--set %s: invalid value %q: %w", key, val, cueVal.Err())
@@ -436,6 +441,32 @@ func buildCUEOverrideExpr(path, value string) string {
 	sb.WriteString(quotedValue)
 
 	return sb.String()
+}
+
+// formatSetValueForTarget formats a CLI --set value using the CUE kind of the
+// target field.
+func formatSetValueForTarget(target cue.Value, val string) string {
+	if shouldKeepSetValueAsString(target) {
+		return strconv.Quote(val)
+	}
+
+	return formatCUEValue(val)
+}
+
+// shouldKeepSetValueAsString returns true for fields that accept strings, but
+// not the scalar types inferred by formatCUEValue. For those fields, values like
+// 90681564 are data, not CUE numbers.
+func shouldKeepSetValueAsString(target cue.Value) bool {
+	if target.Err() != nil {
+		return false
+	}
+
+	targetKind := target.IncompleteKind()
+	acceptsString := targetKind&cue.StringKind != 0
+	inferredScalarKinds := cue.BoolKind | cue.IntKind | cue.FloatKind | cue.NumberKind
+	acceptsInferredScalar := targetKind&inferredScalarKinds != 0
+
+	return acceptsString && !acceptsInferredScalar
 }
 
 // formatCUEValue formats a value for a CUE expression.
