@@ -98,6 +98,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		AutoScalingClient:      clients.AutoScaling,
 		ELBV2Client:            clients.ELBV2,
 		ServiceDiscoveryClient: clients.ServiceDiscovery,
+		CloudWatchClient:       clients.CloudWatch,
 		SchedulerGroupName:     manifest.Name,
 	})
 	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)

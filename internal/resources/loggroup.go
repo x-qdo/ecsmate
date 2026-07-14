@@ -47,11 +47,13 @@ type SubscriptionFilterSpec struct {
 }
 
 type LogGroupResource struct {
-	Name        string
-	Desired     *LogGroupSpec
-	Current     *types.LogGroup
-	CurrentTags map[string]string
-	Action      LogGroupAction
+	Name                       string
+	Desired                    *LogGroupSpec
+	Current                    *types.LogGroup
+	CurrentTags                map[string]string
+	CurrentSubscriptionFilters []types.SubscriptionFilter
+	NeedsSubscriptionReconcile bool
+	Action                     LogGroupAction
 }
 
 type logGroupClient interface {
@@ -168,8 +170,21 @@ func (m *LogGroupManager) BuildResource(ctx context.Context, spec *LogGroupSpec)
 	}
 
 	resource.determineAction()
+	if err := m.discoverSubscriptionFilterChanges(ctx, resource); err != nil {
+		return nil, err
+	}
 
 	return resource, nil
+}
+
+func (m *LogGroupManager) discoverSubscriptionFilterChanges(ctx context.Context, resource *LogGroupResource) error {
+	needsReconcile, currentFilters, err := m.inspectSubscriptionFilters(ctx, resource)
+	if err != nil {
+		return fmt.Errorf("failed to inspect subscription filter state: %w", err)
+	}
+	resource.NeedsSubscriptionReconcile = needsReconcile
+	resource.CurrentSubscriptionFilters = currentFilters
+	return nil
 }
 
 func (m *LogGroupManager) discoverLogGroup(ctx context.Context, resource *LogGroupResource) error {
@@ -299,18 +314,71 @@ func (m *LogGroupManager) Apply(ctx context.Context, resource *LogGroupResource)
 }
 
 func (m *LogGroupManager) NeedsSubscriptionReconcile(ctx context.Context, resource *LogGroupResource) (bool, error) {
+	needsReconcile, _, err := m.inspectSubscriptionFilters(ctx, resource)
+	return needsReconcile, err
+}
+
+func (m *LogGroupManager) inspectSubscriptionFilters(ctx context.Context, resource *LogGroupResource) (bool, []types.SubscriptionFilter, error) {
 	if resource == nil || resource.Desired == nil {
-		return false, nil
-	}
-	if len(resource.Desired.SubscriptionFilters) > 0 {
-		return true, nil
+		return false, nil, nil
 	}
 
 	managedNames, err := m.currentManagedSubscriptionFilterNames(ctx, resource)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
-	return len(managedNames) > 0, nil
+	if resource.Current == nil {
+		return len(resource.Desired.SubscriptionFilters) > 0 || len(managedNames) > 0, nil, nil
+	}
+
+	desiredByName, _, err := desiredSubscriptionFiltersByName(resource.Desired.SubscriptionFilters)
+	if err != nil {
+		return false, nil, err
+	}
+	if len(desiredByName) == 0 && len(managedNames) == 0 {
+		return false, nil, nil
+	}
+
+	currentFilters, err := m.client.DescribeSubscriptionFilters(ctx, resource.Desired.Name)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to describe subscription filters: %w", err)
+	}
+
+	currentByName := make(map[string]types.SubscriptionFilter, len(currentFilters))
+	relevantFilters := make([]types.SubscriptionFilter, 0, len(currentFilters))
+	for _, filter := range currentFilters {
+		name := aws.ToString(filter.FilterName)
+		currentByName[name] = filter
+		if _, desired := desiredByName[name]; desired {
+			relevantFilters = append(relevantFilters, filter)
+			continue
+		}
+		if _, managed := managedNames[name]; managed {
+			relevantFilters = append(relevantFilters, filter)
+		}
+	}
+
+	for _, desired := range resource.Desired.SubscriptionFilters {
+		current, exists := currentByName[desired.Name]
+		if !exists || !subscriptionFilterMatches(desired, current) {
+			return true, relevantFilters, nil
+		}
+	}
+
+	for name := range managedNames {
+		if _, stillDesired := desiredByName[name]; stillDesired {
+			continue
+		}
+		if _, exists := currentByName[name]; exists {
+			return true, relevantFilters, nil
+		}
+	}
+
+	if len(desiredByName) == 0 && len(managedNames) > 0 {
+		return true, relevantFilters, nil
+	}
+
+	return false, relevantFilters, nil
 }
 
 func (m *LogGroupManager) reconcileSubscriptionFilters(ctx context.Context, resource *LogGroupResource) error {

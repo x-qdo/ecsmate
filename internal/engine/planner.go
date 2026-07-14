@@ -37,6 +37,7 @@ func (p *Planner) GeneratePlan(state *resources.DesiredState) *Plan {
 		applyPropagatedChanges(state, changes)
 	}
 
+	p.planLogGroups(state, plan)
 	p.planTaskDefs(state, plan)
 	p.planServiceDiscovery(state, plan)
 	p.planTargetGroups(state, plan)
@@ -134,6 +135,43 @@ func scheduledTaskActionFromString(action string) resources.ScheduledTaskAction 
 		return resources.ScheduledTaskActionDelete
 	default:
 		return resources.ScheduledTaskActionNoop
+	}
+}
+
+func (p *Planner) planLogGroups(state *resources.DesiredState, plan *Plan) {
+	for name, lg := range state.LogGroups {
+		if lg.Action == resources.LogGroupActionNoop && !lg.NeedsSubscriptionReconcile {
+			continue
+		}
+
+		entry := diff.DiffEntry{
+			Name:     name,
+			Resource: "LogGroup",
+		}
+
+		switch lg.Action {
+		case resources.LogGroupActionCreate:
+			entry.Type = diff.DiffTypeCreate
+			entry.Desired = buildLogGroupView(lg)
+			plan.Summary.Creates++
+		case resources.LogGroupActionUpdate:
+			entry.Type = diff.DiffTypeUpdate
+			entry.Current = buildLogGroupCurrentView(lg)
+			entry.Desired = buildLogGroupView(lg)
+			plan.Summary.Updates++
+		case resources.LogGroupActionDelete:
+			entry.Type = diff.DiffTypeDelete
+			entry.Current = buildLogGroupCurrentView(lg)
+			plan.Summary.Deletes++
+		case resources.LogGroupActionNoop:
+			entry.Type = diff.DiffTypeUpdate
+			entry.Current = buildLogGroupCurrentView(lg)
+			entry.Desired = buildLogGroupView(lg)
+			entry.Details = "subscription filters changed"
+			plan.Summary.Updates++
+		}
+
+		plan.Entries = append(plan.Entries, entry)
 	}
 }
 
@@ -488,6 +526,63 @@ func (plan *Plan) HasImageOnlyChanges() bool {
 	}
 
 	return len(imageOnlyTaskDefs) > 0
+}
+
+type LogGroupView struct {
+	Name                string                   `json:"name"`
+	RetentionInDays     int                      `json:"retentionInDays,omitempty"`
+	KMSKeyID            string                   `json:"kmsKeyId,omitempty"`
+	SubscriptionFilters []SubscriptionFilterView `json:"subscriptionFilters,omitempty"`
+}
+
+type SubscriptionFilterView struct {
+	Name           string `json:"name"`
+	DestinationArn string `json:"destinationArn"`
+	FilterPattern  string `json:"filterPattern,omitempty"`
+	RoleArn        string `json:"roleArn,omitempty"`
+	Distribution   string `json:"distribution,omitempty"`
+}
+
+func buildLogGroupView(lg *resources.LogGroupResource) LogGroupView {
+	view := LogGroupView{}
+	if lg == nil || lg.Desired == nil {
+		return view
+	}
+	view.Name = lg.Desired.Name
+	view.RetentionInDays = lg.Desired.RetentionInDays
+	view.KMSKeyID = lg.Desired.KMSKeyID
+	for _, filter := range lg.Desired.SubscriptionFilters {
+		view.SubscriptionFilters = append(view.SubscriptionFilters, SubscriptionFilterView{
+			Name:           filter.Name,
+			DestinationArn: filter.DestinationArn,
+			FilterPattern:  filter.FilterPattern,
+			RoleArn:        filter.RoleArn,
+			Distribution:   filter.Distribution,
+		})
+	}
+	return view
+}
+
+func buildLogGroupCurrentView(lg *resources.LogGroupResource) LogGroupView {
+	view := LogGroupView{}
+	if lg == nil {
+		return view
+	}
+	if lg.Current != nil {
+		view.Name = aws.ToString(lg.Current.LogGroupName)
+		view.RetentionInDays = int(aws.ToInt32(lg.Current.RetentionInDays))
+		view.KMSKeyID = aws.ToString(lg.Current.KmsKeyId)
+	}
+	for _, filter := range lg.CurrentSubscriptionFilters {
+		view.SubscriptionFilters = append(view.SubscriptionFilters, SubscriptionFilterView{
+			Name:           aws.ToString(filter.FilterName),
+			DestinationArn: aws.ToString(filter.DestinationArn),
+			FilterPattern:  aws.ToString(filter.FilterPattern),
+			RoleArn:        aws.ToString(filter.RoleArn),
+			Distribution:   string(filter.Distribution),
+		})
+	}
+	return view
 }
 
 type TaskDefView struct {
