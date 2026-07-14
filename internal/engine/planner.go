@@ -417,10 +417,7 @@ func (plan *Plan) HasChanges() bool {
 // HasImageOnlyChanges returns true if all changes are image-only updates.
 // This means:
 // - All TaskDefinition changes are image-only (only container image fields differ)
-// - All Service/ScheduledTask changes are either:
-//   - Propagated from image-only TaskDefs, or
-//   - Their TaskDef is unchanged (NOOP) - these updates are unrelated to image changes
-//
+// - All Service/ScheduledTask changes are UPDATE entries propagated from image-only TaskDefs
 // - No other resource types (TargetGroup, ListenerRule, etc.) have changes
 func (plan *Plan) HasImageOnlyChanges() bool {
 	if !plan.HasChanges() {
@@ -428,13 +425,10 @@ func (plan *Plan) HasImageOnlyChanges() bool {
 	}
 
 	imageOnlyTaskDefs := make(map[string]bool)
-	noopTaskDefs := make(map[string]bool)
 
 	// First pass: categorize TaskDefs from state (not entries, as NOOP may be filtered)
 	for name, td := range plan.State.TaskDefs {
-		if td.Action == resources.TaskDefActionNoop {
-			noopTaskDefs[name] = true
-		} else if td.IsImageOnlyChange() {
+		if td.IsImageOnlyChange() {
 			imageOnlyTaskDefs[name] = true
 		}
 	}
@@ -458,27 +452,19 @@ func (plan *Plan) HasImageOnlyChanges() bool {
 
 		case "Service":
 			svc, ok := plan.State.Services[entry.Name]
-			if !ok || svc.Desired == nil {
+			if !ok || svc.Desired == nil || entry.PropagationReason != taskDefinitionUpdatePropagationReason {
 				return false
 			}
-			tdName := svc.Desired.TaskDefinition
-			// Allow if:
-			// - TaskDef is image-only (service updates because of image-only TaskDef change), or
-			// - TaskDef is NOOP (service update is unrelated to TaskDef/image changes)
-			if !imageOnlyTaskDefs[tdName] && !noopTaskDefs[tdName] {
+			if !imageOnlyTaskDefs[svc.Desired.TaskDefinition] {
 				return false
 			}
 
 		case "ScheduledTask":
 			task, ok := plan.State.ScheduledTasks[entry.Name]
-			if !ok || task.Desired == nil {
+			if !ok || task.Desired == nil || entry.PropagationReason != taskDefinitionUpdatePropagationReason {
 				return false
 			}
-			tdName := task.Desired.TaskDefinition
-			// Allow if:
-			// - TaskDef is image-only (task updates because of image-only TaskDef change), or
-			// - TaskDef is NOOP (task update is unrelated to TaskDef/image changes)
-			if !imageOnlyTaskDefs[tdName] && !noopTaskDefs[tdName] {
+			if !imageOnlyTaskDefs[task.Desired.TaskDefinition] {
 				return false
 			}
 

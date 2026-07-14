@@ -93,6 +93,8 @@ type Change struct {
 	Reason string
 }
 
+const taskDefinitionUpdatePropagationReason = "task definition updated"
+
 // PropagateChanges propagates changes through the dependency graph
 func (g *DependencyGraph) PropagateChanges() map[string]*Change {
 	changes := make(map[string]*Change)
@@ -183,7 +185,7 @@ func (g *DependencyGraph) propagateToDependent(nodeID string, change *Change, ch
 				changes[depID] = &Change{
 					NodeID: depID,
 					Action: "UPDATE",
-					Reason: "task definition updated",
+					Reason: taskDefinitionUpdatePropagationReason,
 				}
 			}
 		}

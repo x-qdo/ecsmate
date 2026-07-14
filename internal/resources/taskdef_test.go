@@ -601,3 +601,87 @@ func TestConvertContainerDefinition(t *testing.T) {
 		t.Error("expected health check, got nil")
 	}
 }
+
+func TestTaskDefResource_IsImageOnlyChangeRejectsPortMappingChange(t *testing.T) {
+	resource := &TaskDefResource{
+		Action: TaskDefActionUpdate,
+		Current: &types.TaskDefinition{
+			ContainerDefinitions: []types.ContainerDefinition{
+				{
+					Name:      aws.String("web"),
+					Image:     aws.String("web:v1"),
+					Essential: aws.Bool(true),
+				},
+			},
+		},
+		Desired: &config.TaskDefinition{
+			ContainerDefinitions: []config.ContainerDefinition{
+				{
+					Name:      "web",
+					Image:     "web:v2",
+					Essential: true,
+					PortMappings: []config.PortMapping{
+						{ContainerPort: 8080, Protocol: "tcp"},
+					},
+				},
+			},
+		},
+	}
+
+	if resource.IsImageOnlyChange() {
+		t.Error("image plus port mapping change should not be considered image-only")
+	}
+}
+
+func TestTaskDefResource_IsImageOnlyChangeRejectsEssentialChange(t *testing.T) {
+	resource := &TaskDefResource{
+		Action: TaskDefActionUpdate,
+		Current: &types.TaskDefinition{
+			ContainerDefinitions: []types.ContainerDefinition{
+				{Name: aws.String("web"), Image: aws.String("web:v1"), Essential: aws.Bool(true)},
+			},
+		},
+		Desired: &config.TaskDefinition{
+			ContainerDefinitions: []config.ContainerDefinition{
+				{Name: "web", Image: "web:v2", Essential: false},
+			},
+		},
+	}
+
+	if resource.IsImageOnlyChange() {
+		t.Error("image plus essential change should not be considered image-only")
+	}
+}
+
+func TestTaskDefResource_IsImageOnlyChangeAllowsECSAssignedHostPort(t *testing.T) {
+	resource := &TaskDefResource{
+		Action: TaskDefActionUpdate,
+		Current: &types.TaskDefinition{
+			ContainerDefinitions: []types.ContainerDefinition{{
+				Name:      aws.String("web"),
+				Image:     aws.String("web:v1"),
+				Essential: aws.Bool(true),
+				PortMappings: []types.PortMapping{{
+					ContainerPort: aws.Int32(8080),
+					HostPort:      aws.Int32(8080),
+					Protocol:      types.TransportProtocolTcp,
+				}},
+			}},
+		},
+		Desired: &config.TaskDefinition{
+			ContainerDefinitions: []config.ContainerDefinition{{
+				Name:      "web",
+				Image:     "web:v2",
+				Essential: true,
+				PortMappings: []config.PortMapping{{
+					ContainerPort: 8080,
+					Protocol:      "tcp",
+				}},
+			}},
+		},
+	}
+
+	if !resource.IsImageOnlyChange() {
+		t.Error("ECS-assigned hostPort should not disqualify an image-only change")
+	}
+}

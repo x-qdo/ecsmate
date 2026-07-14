@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -665,6 +666,15 @@ func (resource *TaskDefResource) hasTaskLevelChanges() bool {
 	if aws.ToString(current.TaskRoleArn) != desired.TaskRoleArn {
 		return true
 	}
+	if !compatibilitiesEqual(current.RequiresCompatibilities, desired.RequiresCompatibilities) {
+		return true
+	}
+	if !reflect.DeepEqual(current.RuntimePlatform, desiredRuntimePlatform(desired.RuntimePlatform)) {
+		return true
+	}
+	if !reflect.DeepEqual(current.Volumes, desiredVolumes(desired.Volumes)) {
+		return true
+	}
 	if len(current.ContainerDefinitions) != len(desired.ContainerDefinitions) {
 		return true
 	}
@@ -699,57 +709,98 @@ func (resource *TaskDefResource) hasImageOnlyContainerChanges() bool {
 
 // compareContainerForImageOnly returns (imageChanged, hasOtherChanges)
 func compareContainerForImageOnly(current types.ContainerDefinition, desired config.ContainerDefinition) (bool, bool) {
-	imageChanged := aws.ToString(current.Image) != desired.Image
+	desiredContainer := convertContainerDefinition(desired)
+	imageChanged := aws.ToString(current.Image) != aws.ToString(desiredContainer.Image)
 
-	if aws.ToString(current.Name) != desired.Name {
-		return imageChanged, true
-	}
-	if int(current.Cpu) != desired.CPU {
-		return imageChanged, true
-	}
-	if int(aws.ToInt32(current.Memory)) != desired.Memory && desired.Memory != 0 {
-		return imageChanged, true
-	}
-	if !stringSliceEqual(current.Command, desired.Command) {
-		return imageChanged, true
-	}
-	if !stringSliceEqual(current.EntryPoint, desired.EntryPoint) {
-		return imageChanged, true
-	}
+	// Compare every field that ecsmate applies during task definition registration,
+	// but ignore Image because that is the only safe fast-path change.
+	current.Image = nil
+	desiredContainer.Image = nil
 
-	if len(current.Environment) != len(desired.Environment) {
-		return imageChanged, true
+	normalizeECSAssignedContainerDefaults(&current, &desiredContainer)
+
+	return imageChanged, !reflect.DeepEqual(current, desiredContainer)
+}
+
+func normalizeECSAssignedContainerDefaults(current, desired *types.ContainerDefinition) {
+	for i := range current.PortMappings {
+		if i >= len(desired.PortMappings) {
+			return
+		}
+
+		currentPort := &current.PortMappings[i]
+		desiredPort := desired.PortMappings[i]
+		if desiredPort.HostPort == nil &&
+			currentPort.ContainerPort != nil &&
+			aws.ToInt32(currentPort.HostPort) == aws.ToInt32(currentPort.ContainerPort) {
+			currentPort.HostPort = nil
+		}
 	}
-	for _, dEnv := range desired.Environment {
-		found := false
-		for _, cEnv := range current.Environment {
-			if aws.ToString(cEnv.Name) == dEnv.Name && aws.ToString(cEnv.Value) == dEnv.Value {
-				found = true
-				break
+}
+
+func compatibilitiesEqual(current []types.Compatibility, desired []string) bool {
+	if len(current) != len(desired) {
+		return false
+	}
+	for i, compat := range desired {
+		if current[i] != types.Compatibility(compat) {
+			return false
+		}
+	}
+	return true
+}
+
+func desiredRuntimePlatform(platform *config.RuntimePlatform) *types.RuntimePlatform {
+	if platform == nil {
+		return nil
+	}
+	runtimePlatform := &types.RuntimePlatform{}
+	if platform.CPUArchitecture != "" {
+		runtimePlatform.CpuArchitecture = types.CPUArchitecture(platform.CPUArchitecture)
+	}
+	if platform.OperatingSystemFamily != "" {
+		runtimePlatform.OperatingSystemFamily = types.OSFamily(platform.OperatingSystemFamily)
+	}
+	return runtimePlatform
+}
+
+func desiredVolumes(volumes []config.Volume) []types.Volume {
+	if len(volumes) == 0 {
+		return nil
+	}
+	desired := make([]types.Volume, 0, len(volumes))
+	for _, vol := range volumes {
+		volume := types.Volume{Name: aws.String(vol.Name)}
+		if vol.HostPath != "" {
+			volume.Host = &types.HostVolumeProperties{SourcePath: aws.String(vol.HostPath)}
+		}
+		if vol.EFSVolumeConfiguration != nil {
+			efsConfig := &types.EFSVolumeConfiguration{
+				FileSystemId: aws.String(vol.EFSVolumeConfiguration.FileSystemID),
 			}
-		}
-		if !found {
-			return imageChanged, true
-		}
-	}
-
-	if len(current.Secrets) != len(desired.Secrets) {
-		return imageChanged, true
-	}
-	for _, dSecret := range desired.Secrets {
-		found := false
-		for _, cSecret := range current.Secrets {
-			if aws.ToString(cSecret.Name) == dSecret.Name && aws.ToString(cSecret.ValueFrom) == dSecret.ValueFrom {
-				found = true
-				break
+			if vol.EFSVolumeConfiguration.RootDirectory != "" {
+				efsConfig.RootDirectory = aws.String(vol.EFSVolumeConfiguration.RootDirectory)
 			}
+			if vol.EFSVolumeConfiguration.TransitEncryption != "" {
+				efsConfig.TransitEncryption = types.EFSTransitEncryption(vol.EFSVolumeConfiguration.TransitEncryption)
+			}
+			if vol.EFSVolumeConfiguration.TransitEncryptionPort > 0 {
+				efsConfig.TransitEncryptionPort = aws.Int32(int32(vol.EFSVolumeConfiguration.TransitEncryptionPort))
+			}
+			if vol.EFSVolumeConfiguration.AuthorizationConfig != nil {
+				efsConfig.AuthorizationConfig = &types.EFSAuthorizationConfig{}
+				if vol.EFSVolumeConfiguration.AuthorizationConfig.AccessPointID != "" {
+					efsConfig.AuthorizationConfig.AccessPointId = aws.String(vol.EFSVolumeConfiguration.AuthorizationConfig.AccessPointID)
+				}
+				if vol.EFSVolumeConfiguration.AuthorizationConfig.IAM != "" {
+					efsConfig.AuthorizationConfig.Iam = types.EFSAuthorizationConfigIAM(vol.EFSVolumeConfiguration.AuthorizationConfig.IAM)
+				}
+			}
+			volume.EfsVolumeConfiguration = efsConfig
 		}
-		if !found {
-			return imageChanged, true
-		}
+		desired = append(desired, volume)
 	}
-
-	return imageChanged, false
+	return desired
 }
 
 // Register registers the task definition with ECS
