@@ -290,6 +290,36 @@ func TestApplySetValues_OverridesDefaultValues(t *testing.T) {
 	}
 }
 
+func TestApplySetValues_PreservesValuesForStringFields(t *testing.T) {
+	loader := NewCUELoader()
+
+	base := loader.ctx.CompileString(`
+		images: {
+			tag: string | *"original"
+		}
+	`)
+	if base.Err() != nil {
+		t.Fatalf("failed to compile base: %v", base.Err())
+	}
+
+	for _, want := range []string{"90681564", "1.25", "true"} {
+		t.Run(want, func(t *testing.T) {
+			result, err := loader.applySetValues(base, []string{"images.tag=" + want})
+			if err != nil {
+				t.Fatalf("applySetValues failed: %v", err)
+			}
+
+			got, err := ExtractString(result, "images.tag")
+			if err != nil {
+				t.Fatalf("failed to extract tag: %v", err)
+			}
+			if got != want {
+				t.Errorf("tag: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestApplySetValues_HiddenFields(t *testing.T) {
 	loader := NewCUELoader()
 

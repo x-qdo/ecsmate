@@ -348,8 +348,8 @@ func (l *CUELoader) applySetValues(value cue.Value, setValues []string) (cue.Val
 			return cue.Value{}, fmt.Errorf("--set %s: field does not exist\n  Available top-level fields: %s", key, listTopLevelFields(result))
 		}
 
-		// Parse the value to proper CUE type
-		expr := formatCUEValue(val)
+		target := result.LookupPath(path)
+		expr := formatCUEValueForTarget(target, val)
 		cueVal := l.ctx.CompileString(expr)
 		if cueVal.Err() != nil {
 			return cue.Value{}, fmt.Errorf("--set %s: invalid value %q: %w", key, val, cueVal.Err())
@@ -436,6 +436,16 @@ func buildCUEOverrideExpr(path, value string) string {
 	sb.WriteString(quotedValue)
 
 	return sb.String()
+}
+
+func formatCUEValueForTarget(target cue.Value, val string) string {
+	targetKind := target.IncompleteKind()
+	inferredKinds := cue.BoolKind | cue.IntKind | cue.FloatKind
+	if targetKind&cue.StringKind != 0 && targetKind&inferredKinds == 0 {
+		return strconv.Quote(val)
+	}
+
+	return formatCUEValue(val)
 }
 
 // formatCUEValue formats a value for a CUE expression.
