@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
@@ -148,6 +149,74 @@ func TestPlanner_GeneratePlan_EntryTypes(t *testing.T) {
 
 	if typeCount[diff.DiffTypeNoop] != 1 {
 		t.Errorf("expected 1 NOOP, got %d", typeCount[diff.DiffTypeNoop])
+	}
+}
+
+func TestPlanner_GeneratePlan_LogGroupSubscriptionChange(t *testing.T) {
+	const kmsKeyID = "arn:aws:kms:eu-west-1:123456789012:key/logs"
+
+	state := &resources.DesiredState{
+		LogGroups: map[string]*resources.LogGroupResource{
+			"/ecs/app": {
+				Name: "/ecs/app",
+				Desired: &resources.LogGroupSpec{
+					Name:            "/ecs/app",
+					RetentionInDays: 14,
+					KMSKeyID:        kmsKeyID,
+					SubscriptionFilters: []resources.SubscriptionFilterSpec{{
+						Name:           "errors",
+						DestinationArn: "arn:aws:lambda:eu-west-1:123456789012:function:new",
+						FilterPattern:  "?ERROR",
+					}},
+				},
+				Current: &cloudwatchtypes.LogGroup{
+					LogGroupName:    aws.String("/ecs/app"),
+					RetentionInDays: aws.Int32(14),
+					KmsKeyId:        aws.String(kmsKeyID),
+				},
+				CurrentSubscriptionFilters: []cloudwatchtypes.SubscriptionFilter{{
+					FilterName:     aws.String("errors"),
+					DestinationArn: aws.String("arn:aws:lambda:eu-west-1:123456789012:function:old"),
+					FilterPattern:  aws.String("?ERROR"),
+				}},
+				NeedsSubscriptionReconcile: true,
+				Action:                     resources.LogGroupActionNoop,
+			},
+		},
+	}
+
+	plan := NewPlanner().GeneratePlan(state)
+	if len(plan.Entries) != 1 {
+		t.Fatalf("entries: got %d, want 1", len(plan.Entries))
+	}
+
+	entry := plan.Entries[0]
+	if entry.Type != diff.DiffTypeUpdate {
+		t.Errorf("entry type: got %s, want %s", entry.Type, diff.DiffTypeUpdate)
+	}
+	if entry.Details != "subscription filters changed" {
+		t.Errorf("entry details: got %q", entry.Details)
+	}
+
+	current, ok := entry.Current.(LogGroupView)
+	if !ok {
+		t.Fatalf("current view type: got %T", entry.Current)
+	}
+	desired, ok := entry.Desired.(LogGroupView)
+	if !ok {
+		t.Fatalf("desired view type: got %T", entry.Desired)
+	}
+	if current.KMSKeyID != kmsKeyID || desired.KMSKeyID != kmsKeyID {
+		t.Errorf("KMS key IDs: current=%q desired=%q", current.KMSKeyID, desired.KMSKeyID)
+	}
+	if len(current.SubscriptionFilters) != 1 || len(desired.SubscriptionFilters) != 1 {
+		t.Fatalf("subscription filters: current=%d desired=%d", len(current.SubscriptionFilters), len(desired.SubscriptionFilters))
+	}
+	if current.SubscriptionFilters[0].DestinationArn == desired.SubscriptionFilters[0].DestinationArn {
+		t.Errorf("subscription destination change is not visible: %q", current.SubscriptionFilters[0].DestinationArn)
+	}
+	if plan.Summary.Updates != 1 {
+		t.Errorf("updates: got %d, want 1", plan.Summary.Updates)
 	}
 }
 

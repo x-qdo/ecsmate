@@ -28,6 +28,7 @@ type DesiredState struct {
 	TargetGroups     map[string]*TargetGroupResource
 	ListenerRules    []*ListenerRuleResource
 	ServiceDiscovery map[string]*ServiceDiscoveryResource
+	LogGroups        map[string]*LogGroupResource
 }
 
 type ResourceBuilder struct {
@@ -41,6 +42,7 @@ type ResourceBuilder struct {
 	targetGroupManager *TargetGroupManager
 	listenerRuleMgr    *ListenerRuleManager
 	sdManager          *ServiceDiscoveryManager
+	logGroupManager    *LogGroupManager
 }
 
 type ResourceBuilderConfig struct {
@@ -49,6 +51,7 @@ type ResourceBuilderConfig struct {
 	AutoScalingClient      *awsclient.AutoScalingClient
 	ELBV2Client            *awsclient.ELBV2Client
 	ServiceDiscoveryClient *awsclient.ServiceDiscoveryClient
+	CloudWatchClient       *awsclient.CloudWatchLogsClient
 	SchedulerGroupName     string
 }
 
@@ -72,6 +75,11 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 		sdManager = NewServiceDiscoveryManager(cfg.ServiceDiscoveryClient)
 	}
 
+	var logGroupManager *LogGroupManager
+	if cfg.CloudWatchClient != nil {
+		logGroupManager = NewLogGroupManager(cfg.CloudWatchClient)
+	}
+
 	return &ResourceBuilder{
 		ecsClient:          cfg.ECSClient,
 		schedulerClient:    cfg.SchedulerClient,
@@ -83,6 +91,7 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 		targetGroupManager: targetGroupManager,
 		listenerRuleMgr:    listenerRuleMgr,
 		sdManager:          sdManager,
+		logGroupManager:    logGroupManager,
 	}
 }
 
@@ -96,9 +105,14 @@ func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *confi
 		TargetGroups:     make(map[string]*TargetGroupResource),
 		ListenerRules:    make([]*ListenerRuleResource, 0),
 		ServiceDiscovery: make(map[string]*ServiceDiscoveryResource),
+		LogGroups:        make(map[string]*LogGroupResource),
 	}
 
 	log.Info("building desired state from manifest", "name", manifest.Name)
+
+	if err := b.buildLogGroups(ctx, manifest, state); err != nil {
+		return nil, fmt.Errorf("failed to build log groups: %w", err)
+	}
 
 	if err := b.buildTaskDefs(ctx, manifest, state); err != nil {
 		return nil, fmt.Errorf("failed to build task definitions: %w", err)
@@ -121,6 +135,22 @@ func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *confi
 	}
 
 	return state, nil
+}
+
+func (b *ResourceBuilder) buildLogGroups(ctx context.Context, manifest *config.Manifest, state *DesiredState) error {
+	if b.logGroupManager == nil || b.logGroupManager.client == nil {
+		return nil
+	}
+
+	for name, spec := range ExtractLogGroups(manifest) {
+		resource, err := b.logGroupManager.BuildResource(ctx, spec)
+		if err != nil {
+			return fmt.Errorf("failed to build log group %s: %w", name, err)
+		}
+		state.LogGroups[name] = resource
+	}
+
+	return nil
 }
 
 func (b *ResourceBuilder) buildTaskDefs(ctx context.Context, manifest *config.Manifest, state *DesiredState) error {

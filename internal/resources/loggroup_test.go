@@ -200,6 +200,46 @@ func TestExtractLogGroups_SubscriptionFilters(t *testing.T) {
 	}
 }
 
+func TestLogGroupManagerBuildResource_RetainsCurrentSubscriptionsForMetadataUpdate(t *testing.T) {
+	client := newMockLogGroupClient()
+	client.logGroups["/ecs/app"] = &types.LogGroup{
+		LogGroupName:    aws.String("/ecs/app"),
+		RetentionInDays: aws.Int32(7),
+	}
+	client.subscriptionFilters["/ecs/app"] = []types.SubscriptionFilter{{
+		FilterName:     aws.String("errors"),
+		DestinationArn: aws.String("arn:aws:lambda:eu-west-1:123456789012:function:errors"),
+		FilterPattern:  aws.String("?ERROR"),
+	}}
+
+	manager := NewLogGroupManager(client)
+	resource, err := manager.BuildResource(context.Background(), &LogGroupSpec{
+		Name:            "/ecs/app",
+		RetentionInDays: 14,
+		SubscriptionFilters: []SubscriptionFilterSpec{{
+			Name:           "errors",
+			DestinationArn: "arn:aws:lambda:eu-west-1:123456789012:function:errors",
+			FilterPattern:  "?ERROR",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("failed to build log group resource: %v", err)
+	}
+
+	if resource.Action != LogGroupActionUpdate {
+		t.Fatalf("action: got %s, want %s", resource.Action, LogGroupActionUpdate)
+	}
+	if resource.NeedsSubscriptionReconcile {
+		t.Fatal("unchanged subscription filter requires reconciliation")
+	}
+	if len(resource.CurrentSubscriptionFilters) != 1 {
+		t.Fatalf("current subscription filters: got %d, want 1", len(resource.CurrentSubscriptionFilters))
+	}
+	if got := aws.ToString(resource.CurrentSubscriptionFilters[0].DestinationArn); got != "arn:aws:lambda:eu-west-1:123456789012:function:errors" {
+		t.Errorf("current destination ARN: got %q", got)
+	}
+}
+
 func TestLogGroupManagerApply_ReconcilesSubscriptionFiltersOnNoop(t *testing.T) {
 	client := newMockLogGroupClient()
 	client.logGroups["/ecs/app"] = &types.LogGroup{LogGroupName: aws.String("/ecs/app")}
