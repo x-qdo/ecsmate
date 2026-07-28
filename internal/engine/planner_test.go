@@ -915,6 +915,87 @@ func TestPlan_HasImageOnlyChanges_CreateTaskDef(t *testing.T) {
 	}
 }
 
+func TestPlan_HasImageOnlyChanges_DirectServiceUpdateIsNotImageOnly(t *testing.T) {
+	plan := &Plan{
+		State: &resources.DesiredState{
+			TaskDefs: map[string]*resources.TaskDefResource{
+				"web": {
+					Action:  resources.TaskDefActionUpdate,
+					Current: &types.TaskDefinition{ContainerDefinitions: []types.ContainerDefinition{{Name: aws.String("web"), Image: aws.String("web:v1"), Essential: aws.Bool(true)}}},
+					Desired: &config.TaskDefinition{ContainerDefinitions: []config.ContainerDefinition{{Name: "web", Image: "web:v2", Essential: true}}},
+				},
+			},
+			Services: map[string]*resources.ServiceResource{
+				"api": {
+					Action:  resources.ServiceActionUpdate,
+					Desired: &config.Service{TaskDefinition: "web"},
+				},
+			},
+		},
+		Entries: []diff.DiffEntry{
+			{Resource: "TaskDefinition", Name: "web", Type: diff.DiffTypeUpdate},
+			{Resource: "Service", Name: "api", Type: diff.DiffTypeUpdate},
+		},
+		Summary: diff.DiffSummary{Updates: 2},
+	}
+
+	if plan.HasImageOnlyChanges() {
+		t.Error("direct Service UPDATE should not be considered image-only")
+	}
+}
+
+func TestPlan_HasImageOnlyChanges_PropagatedServiceUpdateIsImageOnly(t *testing.T) {
+	state := &resources.DesiredState{
+		TaskDefs: map[string]*resources.TaskDefResource{
+			"web": {
+				Action:  resources.TaskDefActionUpdate,
+				Current: &types.TaskDefinition{ContainerDefinitions: []types.ContainerDefinition{{Name: aws.String("web"), Image: aws.String("web:v1"), Essential: aws.Bool(true)}}},
+				Desired: &config.TaskDefinition{ContainerDefinitions: []config.ContainerDefinition{{Name: "web", Image: "web:v2", Essential: true}}},
+			},
+		},
+		Services: map[string]*resources.ServiceResource{
+			"api": {
+				Action:  resources.ServiceActionNoop,
+				Desired: &config.Service{TaskDefinition: "web"},
+			},
+		},
+	}
+
+	plan := NewPlanner().GeneratePlan(state)
+	if !plan.HasImageOnlyChanges() {
+		t.Error("propagated Service UPDATE from image-only TaskDefinition should be considered image-only")
+	}
+}
+
+func TestPlan_HasImageOnlyChanges_NonTaskDefPropagationIsNotImageOnly(t *testing.T) {
+	plan := &Plan{
+		State: &resources.DesiredState{
+			TaskDefs: map[string]*resources.TaskDefResource{
+				"web": {
+					Action:  resources.TaskDefActionUpdate,
+					Current: &types.TaskDefinition{ContainerDefinitions: []types.ContainerDefinition{{Name: aws.String("web"), Image: aws.String("web:v1"), Essential: aws.Bool(true)}}},
+					Desired: &config.TaskDefinition{ContainerDefinitions: []config.ContainerDefinition{{Name: "web", Image: "web:v2", Essential: true}}},
+				},
+			},
+			Services: map[string]*resources.ServiceResource{
+				"api": {
+					Action:  resources.ServiceActionUpdate,
+					Desired: &config.Service{TaskDefinition: "web"},
+				},
+			},
+		},
+		Entries: []diff.DiffEntry{
+			{Resource: "TaskDefinition", Name: "web", Type: diff.DiffTypeUpdate},
+			{Resource: "Service", Name: "api", Type: diff.DiffTypeUpdate, PropagationReason: "TargetGroup recreated"},
+		},
+		Summary: diff.DiffSummary{Updates: 2},
+	}
+
+	if plan.HasImageOnlyChanges() {
+		t.Error("service update propagated from a non-task-definition change should not be considered image-only")
+	}
+}
+
 // Phase 4: Tests for planner integration with propagation
 
 func TestPlanner_GeneratePlan_PropagatesTargetGroupDelete(t *testing.T) {
