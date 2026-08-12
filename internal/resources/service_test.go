@@ -1295,3 +1295,65 @@ func TestServiceResource_DetermineAction_Update_CPChange(t *testing.T) {
 		t.Errorf("expected action UPDATE for capacity provider change, got %s", resource.Action)
 	}
 }
+
+func TestServiceResource_ToUpdateInput_ForceNewDeployment_FailedPrimary(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:         "web-service",
+			Cluster:      "test-cluster",
+			DesiredCount: 1,
+		},
+		Current: &types.Service{
+			ServiceName:    aws.String("web-service"),
+			TaskDefinition: aws.String("arn:aws:ecs:us-east-1:123456789:task-definition/web:1"),
+			DesiredCount:   1,
+			Deployments: []types.Deployment{{
+				Id:           aws.String("ecs-svc/failed"),
+				Status:       aws.String("PRIMARY"),
+				RolloutState: types.DeploymentRolloutStateFailed,
+			}},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	input, err := resource.ToUpdateInput()
+	if err != nil {
+		t.Fatalf("failed to create update input: %v", err)
+	}
+
+	if !input.ForceNewDeployment {
+		t.Error("expected ForceNewDeployment=true for a failed primary deployment")
+	}
+	if got := resource.PrimaryDeploymentID(); got != "ecs-svc/failed" {
+		t.Errorf("expected primary deployment ID %q, got %q", "ecs-svc/failed", got)
+	}
+}
+
+func TestServiceResource_DetermineAction_Update_FailedPrimary(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "web",
+		Desired: &config.Service{
+			Name:         "web-service",
+			Cluster:      "test-cluster",
+			DesiredCount: 1,
+		},
+		Current: &types.Service{
+			ServiceName:    aws.String("web-service"),
+			TaskDefinition: aws.String("arn:aws:ecs:us-east-1:123456789:task-definition/web:1"),
+			DesiredCount:   1,
+			Deployments: []types.Deployment{{
+				Id:           aws.String("ecs-svc/failed"),
+				Status:       aws.String("PRIMARY"),
+				RolloutState: types.DeploymentRolloutStateFailed,
+			}},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/web:1",
+	}
+
+	resource.determineAction()
+
+	if resource.Action != ServiceActionUpdate {
+		t.Errorf("expected action UPDATE for a failed primary deployment, got %s", resource.Action)
+	}
+}
