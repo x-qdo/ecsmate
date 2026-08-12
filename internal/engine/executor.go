@@ -38,6 +38,12 @@ type Executor struct {
 	logLines            int
 }
 
+type deploymentWaitTarget struct {
+	expectedID string
+	previousID string
+	requireNew bool
+}
+
 type ExecutorConfig struct {
 	ECSClient              *aws.ECSClient
 	SchedulerClient        *aws.SchedulerClient
@@ -586,6 +592,7 @@ func (e *Executor) waitForService(ctx context.Context, svc *resources.ServiceRes
 		serviceName = svc.Desired.Name
 	}
 	expectedTaskDef := svc.TaskDefinitionArn
+	target := newDeploymentWaitTarget(svc)
 
 	// Track events after deployment started
 	deploymentStartTime := time.Now()
@@ -633,6 +640,20 @@ func (e *Executor) waitForService(ctx context.Context, svc *resources.ServiceRes
 					"running", status.ActiveDeployment.RunningCount,
 					"pending", status.ActiveDeployment.PendingCount,
 				)
+			}
+
+			if target.failedActiveDeployment(status) {
+				e.printFailureLogs(ctx, serviceName, status.Events, svc, deploymentStartTime)
+				return fmt.Errorf("deployment failed (circuit breaker triggered)")
+			}
+			if !target.matches(status.DeploymentID) {
+				log.Debug("waiting for current deployment to become visible",
+					"service", serviceName,
+					"expectedDeploymentID", target.expectedID,
+					"previousDeploymentID", target.previousID,
+					"observedDeploymentID", status.DeploymentID,
+				)
+				continue
 			}
 
 			// Collect recent events (up to 5, newest first) that occurred after deployment started
@@ -707,17 +728,17 @@ func (e *Executor) waitForService(ctx context.Context, svc *resources.ServiceRes
 			switch status.RolloutState {
 			case "COMPLETED":
 				if rollbackDetected(expectedTaskDef, status) {
-					e.printFailureLogs(ctx, serviceName, status.Events, svc)
+					e.printFailureLogs(ctx, serviceName, status.Events, svc, deploymentStartTime)
 					return fmt.Errorf("deployment rolled back to %s", status.TaskDefinition)
 				}
 				return nil
 			case "FAILED":
-				e.printFailureLogs(ctx, serviceName, status.Events, svc)
+				e.printFailureLogs(ctx, serviceName, status.Events, svc, deploymentStartTime)
 				return fmt.Errorf("deployment failed (circuit breaker triggered)")
 			}
 
 			if rollbackInProgress(expectedTaskDef, status) {
-				e.printFailureLogs(ctx, serviceName, status.Events, svc)
+				e.printFailureLogs(ctx, serviceName, status.Events, svc, deploymentStartTime)
 				return fmt.Errorf("deployment rollback started: %s", status.RolloutStateReason)
 			}
 
@@ -732,6 +753,49 @@ func (e *Executor) waitForService(ctx context.Context, svc *resources.ServiceRes
 			}
 		}
 	}
+}
+
+func newDeploymentWaitTarget(svc *resources.ServiceResource) deploymentWaitTarget {
+	target := deploymentWaitTarget{
+		expectedID: svc.PrimaryDeploymentID(),
+		previousID: svc.PreviousDeploymentID,
+		requireNew: svc.RequireNewDeployment,
+	}
+
+	// UpdateService can briefly return the old primary deployment even when a
+	// forced deployment was accepted. In that case, latch onto the first new ID
+	// returned by DescribeServices instead of treating the old FAILED state as current.
+	if target.requireNew && target.expectedID == target.previousID {
+		target.expectedID = ""
+	}
+
+	return target
+}
+
+func (t *deploymentWaitTarget) matches(deploymentID string) bool {
+	if deploymentID == "" {
+		return !t.requireNew && t.expectedID == ""
+	}
+	if t.requireNew && deploymentID == t.previousID {
+		return false
+	}
+	if t.expectedID == "" {
+		t.expectedID = deploymentID
+	}
+
+	return deploymentID == t.expectedID
+}
+
+func (t *deploymentWaitTarget) failedActiveDeployment(status *aws.DeploymentStatus) bool {
+	if status == nil || status.ActiveDeployment == nil ||
+		status.ActiveDeployment.RolloutState != "FAILED" {
+		return false
+	}
+	if t.expectedID == "" && !t.requireNew {
+		return false
+	}
+
+	return t.matches(status.ActiveDeployment.ID)
 }
 
 func rollbackDetected(expectedTaskDef string, status *aws.DeploymentStatus) bool {
@@ -1104,7 +1168,13 @@ func (e *Executor) resolveHookTaskDefArn(plan *ExecutionPlan, taskDefName string
 }
 
 // printFailureLogs fetches stopped tasks via API and prints their logs
-func (e *Executor) printFailureLogs(ctx context.Context, serviceName string, events []aws.ServiceEvent, svc *resources.ServiceResource) {
+func (e *Executor) printFailureLogs(
+	ctx context.Context,
+	serviceName string,
+	events []aws.ServiceEvent,
+	svc *resources.ServiceResource,
+	deploymentStartTime time.Time,
+) {
 	if e.cloudwatchClient == nil || e.logLines == 0 || e.ecsClient == nil {
 		return
 	}
@@ -1158,6 +1228,9 @@ func (e *Executor) printFailureLogs(ctx context.Context, serviceName string, eve
 
 	// Print stop reason and logs for each failed task
 	for _, task := range stoppedTasks {
+		if !taskStartedForDeployment(task, deploymentStartTime) {
+			continue
+		}
 		if task.StoppedReason != "" {
 			e.tracker.PrintLogs(serviceName, []string{
 				fmt.Sprintf("Task %s stopped: %s", task.TaskID[:8], task.StoppedReason),
@@ -1175,6 +1248,18 @@ func (e *Executor) printFailureLogs(ctx context.Context, serviceName string, eve
 			e.tracker.PrintLogs(serviceName, logs)
 		}
 	}
+}
+
+func taskStartedForDeployment(task aws.TaskInfo, deploymentStartTime time.Time) bool {
+	cutoff := deploymentStartTime.Add(-30 * time.Second)
+	if task.StartedAt != nil {
+		return !task.StartedAt.Before(cutoff)
+	}
+	if task.StoppedAt != nil {
+		return !task.StoppedAt.Before(cutoff)
+	}
+
+	return false
 }
 
 // fetchFailureLogs fetches CloudWatch logs for a failed task.

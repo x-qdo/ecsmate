@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
+	awsclient "github.com/x-qdo/ecsmate/internal/aws"
 	"github.com/x-qdo/ecsmate/internal/config"
 	"github.com/x-qdo/ecsmate/internal/resources"
 )
@@ -446,5 +449,98 @@ func TestExecutorConfig_Fields(t *testing.T) {
 	}
 	if cfg.Timeout != 5*time.Minute {
 		t.Errorf("expected Timeout 5m, got %v", cfg.Timeout)
+	}
+}
+
+func TestDeploymentWaitTarget_IgnoresPreviousDeployment(t *testing.T) {
+	target := deploymentWaitTarget{
+		expectedID: "ecs-svc/new",
+		previousID: "ecs-svc/failed",
+		requireNew: true,
+	}
+
+	if target.matches("ecs-svc/failed") {
+		t.Fatal("expected the previous failed deployment to be ignored")
+	}
+	if !target.matches("ecs-svc/new") {
+		t.Fatal("expected the deployment started by this apply to be accepted")
+	}
+}
+
+func TestDeploymentWaitTarget_LatchesFirstNewDeployment(t *testing.T) {
+	target := deploymentWaitTarget{
+		previousID: "ecs-svc/failed",
+		requireNew: true,
+	}
+
+	if target.matches("ecs-svc/failed") {
+		t.Fatal("expected the previous failed deployment to be ignored")
+	}
+	if !target.matches("ecs-svc/new") {
+		t.Fatal("expected the first new deployment ID to be accepted")
+	}
+	if target.expectedID != "ecs-svc/new" {
+		t.Fatalf("expected target to latch %q, got %q", "ecs-svc/new", target.expectedID)
+	}
+	if target.matches("ecs-svc/other") {
+		t.Fatal("expected a different deployment ID to be ignored after latching")
+	}
+}
+
+func TestNewDeploymentWaitTarget_DiscardsStaleUpdateResponse(t *testing.T) {
+	svc := &resources.ServiceResource{
+		Current: &types.Service{Deployments: []types.Deployment{{
+			Id:     aws.String("ecs-svc/failed"),
+			Status: aws.String("PRIMARY"),
+		}}},
+		PreviousDeploymentID: "ecs-svc/failed",
+		RequireNewDeployment: true,
+	}
+
+	target := newDeploymentWaitTarget(svc)
+
+	if target.expectedID != "" {
+		t.Fatalf("expected stale deployment ID to be discarded, got %q", target.expectedID)
+	}
+	if target.matches("ecs-svc/failed") {
+		t.Fatal("expected the stale deployment ID to remain ignored")
+	}
+	if !target.matches("ecs-svc/new") {
+		t.Fatal("expected the new deployment ID to be accepted")
+	}
+}
+
+func TestDeploymentWaitTarget_DetectsExpectedFailedActiveDeployment(t *testing.T) {
+	target := deploymentWaitTarget{
+		expectedID: "ecs-svc/new",
+		previousID: "ecs-svc/old",
+		requireNew: true,
+	}
+	status := &awsclient.DeploymentStatus{
+		ActiveDeployment: &awsclient.DeploymentInfo{
+			ID:           "ecs-svc/new",
+			RolloutState: "FAILED",
+		},
+	}
+
+	if !target.failedActiveDeployment(status) {
+		t.Fatal("expected a failed target deployment to be detected after rollback starts")
+	}
+}
+
+func TestTaskStartedForDeployment(t *testing.T) {
+	deploymentStart := time.Date(2026, time.August, 10, 15, 59, 39, 0, time.UTC)
+	recentStart := deploymentStart.Add(-10 * time.Second)
+	oldStart := deploymentStart.Add(-20 * time.Minute)
+	recentStop := deploymentStart.Add(5 * time.Second)
+
+	if !taskStartedForDeployment(awsclient.TaskInfo{StartedAt: &recentStart}, deploymentStart) {
+		t.Fatal("expected a recently started task to be included")
+	}
+	if taskStartedForDeployment(awsclient.TaskInfo{StartedAt: &oldStart}, deploymentStart) {
+		t.Fatal("expected an old stopped task to be excluded")
+	}
+	if !taskStartedForDeployment(awsclient.TaskInfo{StoppedAt: &recentStop}, deploymentStart) {
+		t.Fatal("expected a task without StartedAt but recently stopped to be included")
 	}
 }

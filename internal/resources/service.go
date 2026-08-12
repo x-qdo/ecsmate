@@ -42,6 +42,11 @@ type ServiceResource struct {
 	TaskDefinitionArn string
 	ClusterArn        string
 
+	// Transient deployment state used by the executor to distinguish the
+	// deployment started by this apply from a previously failed rollout.
+	PreviousDeploymentID string
+	RequireNewDeployment bool
+
 	// Recreate tracking - fields that changed and force recreation
 	RecreateReasons []string
 
@@ -111,6 +116,35 @@ func (r *ServiceResource) Validate() error {
 	}
 
 	return nil
+}
+
+func (r *ServiceResource) PrimaryDeploymentID() string {
+	if r.Current == nil {
+		return ""
+	}
+
+	for _, deployment := range r.Current.Deployments {
+		if aws.ToString(deployment.Status) == "PRIMARY" {
+			return aws.ToString(deployment.Id)
+		}
+	}
+
+	return ""
+}
+
+func (r *ServiceResource) primaryDeploymentFailed() bool {
+	if r.Current == nil {
+		return false
+	}
+
+	for _, deployment := range r.Current.Deployments {
+		if aws.ToString(deployment.Status) == "PRIMARY" &&
+			deployment.RolloutState == types.DeploymentRolloutStateFailed {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (r *ServiceResource) ToCreateInput() (*ecs.CreateServiceInput, error) {
@@ -228,6 +262,11 @@ func (r *ServiceResource) ToUpdateInput() (*ecs.UpdateServiceInput, error) {
 		input.ForceNewDeployment = true
 	}
 	if r.Current != nil && r.capacityProviderStrategyChanged() {
+		input.ForceNewDeployment = true
+	}
+	// ECS does not resume a deployment after its circuit breaker marks it as
+	// failed. Retrying the same desired state must start a fresh deployment.
+	if r.primaryDeploymentFailed() {
 		input.ForceNewDeployment = true
 	}
 	if svc.HealthCheckGracePeriodSecondsSet {
@@ -627,6 +666,9 @@ func (resource *ServiceResource) hasChanges() bool {
 	if resource.Current == nil || resource.Desired == nil {
 		return true
 	}
+	if resource.primaryDeploymentFailed() {
+		return true
+	}
 
 	current := resource.Current
 	desired := resource.Desired
@@ -744,6 +786,9 @@ func (m *ServiceManager) Update(ctx context.Context, resource *ServiceResource) 
 	if err != nil {
 		return err
 	}
+
+	resource.PreviousDeploymentID = resource.PrimaryDeploymentID()
+	resource.RequireNewDeployment = input.ForceNewDeployment
 
 	updated, err := m.ecsClient.UpdateService(ctx, input)
 	if err != nil {
