@@ -337,6 +337,14 @@ func TestHasContainerChanges_DetectsPreservedFields(t *testing.T) {
 				HardLimit: 2048,
 			}}},
 		},
+		{
+			name: "restart policy",
+			desired: config.ContainerDefinition{RestartPolicy: &config.RestartPolicy{
+				Enabled:              true,
+				IgnoredExitCodes:     []int{143},
+				RestartAttemptPeriod: 60,
+			}},
+		},
 	}
 
 	for _, tt := range tests {
@@ -368,6 +376,10 @@ func TestHasContainerChanges_NormalizesECSDefaults(t *testing.T) {
 		HealthCheck: &config.HealthCheck{
 			Command: []string{"CMD-SHELL", "check-health"},
 		},
+		RestartPolicy: &config.RestartPolicy{
+			Enabled:          true,
+			IgnoredExitCodes: []int{143, 137},
+		},
 	}
 	current := convertContainerDefinition(desired)
 	current.PortMappings[0].HostPort = aws.Int32(8080)
@@ -376,9 +388,30 @@ func TestHasContainerChanges_NormalizesECSDefaults(t *testing.T) {
 	current.HealthCheck.Timeout = aws.Int32(5)
 	current.HealthCheck.Retries = aws.Int32(3)
 	current.HealthCheck.StartPeriod = aws.Int32(0)
+	current.RestartPolicy.RestartAttemptPeriod = aws.Int32(300)
+	current.RestartPolicy.IgnoredExitCodes[0], current.RestartPolicy.IgnoredExitCodes[1] =
+		current.RestartPolicy.IgnoredExitCodes[1], current.RestartPolicy.IgnoredExitCodes[0]
 
 	if hasContainerChanges(current, desired) {
 		t.Fatal("expected ECS-assigned defaults to compare equal to omitted values")
+	}
+}
+
+func TestHasContainerChanges_NormalizesRestartPolicyEmptyExitCodes(t *testing.T) {
+	desired := config.ContainerDefinition{
+		Name:      "messenger",
+		Image:     "messenger:latest",
+		Essential: true,
+		RestartPolicy: &config.RestartPolicy{
+			Enabled: true,
+		},
+	}
+	current := convertContainerDefinition(desired)
+	current.RestartPolicy.IgnoredExitCodes = []int32{}
+	current.RestartPolicy.RestartAttemptPeriod = aws.Int32(300)
+
+	if hasContainerChanges(current, desired) {
+		t.Fatal("expected ECS restart policy defaults to compare equal to omitted values")
 	}
 }
 
@@ -598,6 +631,11 @@ func TestConvertECSContainerDefinition(t *testing.T) {
 		DependsOn: []types.ContainerDependency{
 			{ContainerName: aws.String("init"), Condition: types.ContainerConditionComplete},
 		},
+		RestartPolicy: &types.ContainerRestartPolicy{
+			Enabled:              aws.Bool(true),
+			IgnoredExitCodes:     []int32{143},
+			RestartAttemptPeriod: aws.Int32(60),
+		},
 	}
 
 	result := convertECSContainerDefinition(ecsCD)
@@ -643,6 +681,15 @@ func TestConvertECSContainerDefinition(t *testing.T) {
 	}
 	if len(result.DependsOn) != 1 {
 		t.Errorf("expected 1 dependency, got %d", len(result.DependsOn))
+	}
+	if result.RestartPolicy == nil || !result.RestartPolicy.Enabled {
+		t.Fatalf("expected enabled restart policy, got %+v", result.RestartPolicy)
+	}
+	if len(result.RestartPolicy.IgnoredExitCodes) != 1 || result.RestartPolicy.IgnoredExitCodes[0] != 143 {
+		t.Errorf("unexpected ignored exit codes: %v", result.RestartPolicy.IgnoredExitCodes)
+	}
+	if result.RestartPolicy.RestartAttemptPeriod != 60 {
+		t.Errorf("expected restart attempt period 60, got %d", result.RestartPolicy.RestartAttemptPeriod)
 	}
 }
 
@@ -729,6 +776,11 @@ func TestConvertContainerDefinition(t *testing.T) {
 			Retries:     3,
 			StartPeriod: 60,
 		},
+		RestartPolicy: &config.RestartPolicy{
+			Enabled:              true,
+			IgnoredExitCodes:     []int{143},
+			RestartAttemptPeriod: 60,
+		},
 	}
 
 	result := convertContainerDefinition(cd)
@@ -752,6 +804,15 @@ func TestConvertContainerDefinition(t *testing.T) {
 	if result.HealthCheck == nil {
 		t.Error("expected health check, got nil")
 	}
+	if result.RestartPolicy == nil || !aws.ToBool(result.RestartPolicy.Enabled) {
+		t.Fatalf("expected enabled restart policy, got %+v", result.RestartPolicy)
+	}
+	if len(result.RestartPolicy.IgnoredExitCodes) != 1 || result.RestartPolicy.IgnoredExitCodes[0] != 143 {
+		t.Errorf("unexpected ignored exit codes: %v", result.RestartPolicy.IgnoredExitCodes)
+	}
+	if aws.ToInt32(result.RestartPolicy.RestartAttemptPeriod) != 60 {
+		t.Errorf("expected restart attempt period 60, got %d", aws.ToInt32(result.RestartPolicy.RestartAttemptPeriod))
+	}
 }
 
 func TestConvertContainerDefinition_OmitsUnsetHealthCheckValues(t *testing.T) {
@@ -769,6 +830,24 @@ func TestConvertContainerDefinition_OmitsUnsetHealthCheckValues(t *testing.T) {
 	}
 	if result.HealthCheck.Interval != nil || result.HealthCheck.Timeout != nil || result.HealthCheck.Retries != nil || result.HealthCheck.StartPeriod != nil {
 		t.Errorf("expected omitted optional health check values, got %+v", result.HealthCheck)
+	}
+}
+
+func TestConvertContainerDefinition_OmitsUnsetRestartAttemptPeriod(t *testing.T) {
+	result := convertContainerDefinition(config.ContainerDefinition{
+		Name:      "messenger",
+		Image:     "messenger:latest",
+		Essential: true,
+		RestartPolicy: &config.RestartPolicy{
+			Enabled: true,
+		},
+	})
+
+	if result.RestartPolicy == nil || !aws.ToBool(result.RestartPolicy.Enabled) {
+		t.Fatalf("expected enabled restart policy, got %+v", result.RestartPolicy)
+	}
+	if result.RestartPolicy.RestartAttemptPeriod != nil {
+		t.Fatalf("expected ECS default restart attempt period, got %d", aws.ToInt32(result.RestartPolicy.RestartAttemptPeriod))
 	}
 }
 

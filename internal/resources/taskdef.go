@@ -250,6 +250,21 @@ func convertContainerDefinition(cd config.ContainerDefinition) types.ContainerDe
 		})
 	}
 
+	if cd.RestartPolicy != nil {
+		containerDef.RestartPolicy = &types.ContainerRestartPolicy{
+			Enabled: aws.Bool(cd.RestartPolicy.Enabled),
+		}
+		for _, exitCode := range cd.RestartPolicy.IgnoredExitCodes {
+			containerDef.RestartPolicy.IgnoredExitCodes = append(
+				containerDef.RestartPolicy.IgnoredExitCodes,
+				int32(exitCode),
+			)
+		}
+		if cd.RestartPolicy.RestartAttemptPeriod > 0 {
+			containerDef.RestartPolicy.RestartAttemptPeriod = aws.Int32(int32(cd.RestartPolicy.RestartAttemptPeriod))
+		}
+	}
+
 	return containerDef
 }
 
@@ -509,6 +524,16 @@ func convertECSContainerDefinition(cd types.ContainerDefinition) config.Containe
 		})
 	}
 
+	if cd.RestartPolicy != nil {
+		result.RestartPolicy = &config.RestartPolicy{
+			Enabled:              aws.ToBool(cd.RestartPolicy.Enabled),
+			RestartAttemptPeriod: int(aws.ToInt32(cd.RestartPolicy.RestartAttemptPeriod)),
+		}
+		for _, exitCode := range cd.RestartPolicy.IgnoredExitCodes {
+			result.RestartPolicy.IgnoredExitCodes = append(result.RestartPolicy.IgnoredExitCodes, int(exitCode))
+		}
+	}
+
 	return result
 }
 
@@ -678,6 +703,16 @@ func normalizeECSAssignedContainerDefaults(current, desired *types.ContainerDefi
 		healthCheck := *current.HealthCheck
 		current.HealthCheck = &healthCheck
 	}
+	if current.RestartPolicy != nil {
+		restartPolicy := *current.RestartPolicy
+		restartPolicy.IgnoredExitCodes = append([]int32(nil), current.RestartPolicy.IgnoredExitCodes...)
+		current.RestartPolicy = &restartPolicy
+	}
+	if desired.RestartPolicy != nil {
+		restartPolicy := *desired.RestartPolicy
+		restartPolicy.IgnoredExitCodes = append([]int32(nil), desired.RestartPolicy.IgnoredExitCodes...)
+		desired.RestartPolicy = &restartPolicy
+	}
 
 	for i := range current.PortMappings {
 		if i >= len(desired.PortMappings) {
@@ -709,6 +744,25 @@ func normalizeECSAssignedContainerDefaults(current, desired *types.ContainerDefi
 		if desired.HealthCheck.StartPeriod == nil && aws.ToInt32(current.HealthCheck.StartPeriod) == 0 {
 			current.HealthCheck.StartPeriod = nil
 		}
+	}
+	if current.RestartPolicy != nil && desired.RestartPolicy != nil &&
+		desired.RestartPolicy.RestartAttemptPeriod == nil &&
+		aws.ToInt32(current.RestartPolicy.RestartAttemptPeriod) == 300 {
+		current.RestartPolicy.RestartAttemptPeriod = nil
+	}
+	if current.RestartPolicy != nil && desired.RestartPolicy != nil {
+		if len(current.RestartPolicy.IgnoredExitCodes) == 0 {
+			current.RestartPolicy.IgnoredExitCodes = nil
+		}
+		if len(desired.RestartPolicy.IgnoredExitCodes) == 0 {
+			desired.RestartPolicy.IgnoredExitCodes = nil
+		}
+		sort.Slice(current.RestartPolicy.IgnoredExitCodes, func(i, j int) bool {
+			return current.RestartPolicy.IgnoredExitCodes[i] < current.RestartPolicy.IgnoredExitCodes[j]
+		})
+		sort.Slice(desired.RestartPolicy.IgnoredExitCodes, func(i, j int) bool {
+			return desired.RestartPolicy.IgnoredExitCodes[i] < desired.RestartPolicy.IgnoredExitCodes[j]
+		})
 	}
 
 	// ECS treats environment variables and secrets as name-addressed values;

@@ -151,6 +151,13 @@ type ContainerDefinition struct {
 	DependsOn        []ContainerDependency
 	LinuxParameters  *LinuxParameters
 	Ulimits          []Ulimit
+	RestartPolicy    *RestartPolicy
+}
+
+type RestartPolicy struct {
+	Enabled              bool
+	IgnoredExitCodes     []int
+	RestartAttemptPeriod int
 }
 
 type LinuxParameters struct {
@@ -690,6 +697,27 @@ func extractOptionalStringSlice(v cue.Value, path string) ([]string, bool, error
 	return result, true, nil
 }
 
+func extractOptionalIntSlice(v cue.Value, path string) ([]int, bool, error) {
+	value := v.LookupPath(cue.ParsePath(path))
+	if !value.Exists() {
+		return nil, false, nil
+	}
+	iter, err := value.List()
+	if err != nil {
+		return nil, true, err
+	}
+
+	var result []int
+	for i := 0; iter.Next(); i++ {
+		item, err := iter.Value().Int64()
+		if err != nil {
+			return nil, true, fmt.Errorf("[%d]: %w", i, err)
+		}
+		result = append(result, int(item))
+	}
+	return result, true, nil
+}
+
 func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	cd := ContainerDefinition{Essential: true}
 	if err := v.Validate(cue.Concrete(true)); err != nil {
@@ -945,6 +973,39 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 			}
 			ulimit.HardLimit = int(hardLimit)
 			cd.Ulimits = append(cd.Ulimits, ulimit)
+		}
+	}
+
+	// Parse the ECS native container restart policy.
+	restartPolicy := v.LookupPath(cue.ParsePath("restartPolicy"))
+	if restartPolicy.Exists() {
+		enabled, err := ExtractBool(restartPolicy, "enabled")
+		if err != nil {
+			return cd, fmt.Errorf("restartPolicy.enabled is required: %w", err)
+		}
+		cd.RestartPolicy = &RestartPolicy{Enabled: enabled}
+
+		if ignoredExitCodes, ok, err := extractOptionalIntSlice(restartPolicy, "ignoredExitCodes"); err != nil {
+			return cd, fmt.Errorf("restartPolicy.ignoredExitCodes: %w", err)
+		} else if ok {
+			if len(ignoredExitCodes) > 50 {
+				return cd, fmt.Errorf("restartPolicy.ignoredExitCodes must contain at most 50 values")
+			}
+			for i, exitCode := range ignoredExitCodes {
+				if exitCode < 0 || exitCode > 255 {
+					return cd, fmt.Errorf("restartPolicy.ignoredExitCodes[%d] must be between 0 and 255", i)
+				}
+			}
+			cd.RestartPolicy.IgnoredExitCodes = ignoredExitCodes
+		}
+
+		if period, ok, err := extractOptionalInt(restartPolicy, "restartAttemptPeriod"); err != nil {
+			return cd, fmt.Errorf("restartPolicy.restartAttemptPeriod: %w", err)
+		} else if ok {
+			if period < 60 || period > 1800 {
+				return cd, fmt.Errorf("restartPolicy.restartAttemptPeriod must be between 60 and 1800 seconds")
+			}
+			cd.RestartPolicy.RestartAttemptPeriod = int(period)
 		}
 	}
 

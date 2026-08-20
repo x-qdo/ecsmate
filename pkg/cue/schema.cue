@@ -1,5 +1,7 @@
 package schema
 
+import "list"
+
 #Manifest: {
 	name: string
 	tags?: [string]: string
@@ -77,6 +79,7 @@ package schema
 	dependsOn?: [...#ContainerDependency]
 	ulimits?: [...#Ulimit]
 	linuxParameters?: #LinuxParameters
+	restartPolicy?: #RestartPolicy
 }
 
 #ContainerOverride: {
@@ -164,4 +167,10 @@ package schema
 		drop?: [...string]
 	}
 	initProcessEnabled?: bool
+}
+
+#RestartPolicy: {
+	enabled: bool
+	ignoredExitCodes?: [...(int & >=0 & <=255)] & list.MaxItems(50)
+	restartAttemptPeriod?: int & >=60 & <=1800
 }

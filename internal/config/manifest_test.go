@@ -21,6 +21,7 @@ func TestParseContainerDefinition_RejectsNonConcreteFields(t *testing.T) {
 		{name: "dependency", body: `dependsOn: [{containerName: string, condition: "SUCCESS"}]`, wantErr: "dependsOn.0.containerName"},
 		{name: "Linux capabilities", body: `linuxParameters: capabilities: add: [string]`, wantErr: "linuxParameters.capabilities.add"},
 		{name: "ulimit", body: `ulimits: [{name: "nofile", softLimit: int, hardLimit: 2048}]`, wantErr: "ulimits.0.softLimit"},
+		{name: "restart policy", body: `restartPolicy: {enabled: bool}`, wantErr: "restartPolicy.enabled"},
 		{name: "log option", body: `logConfiguration: {logDriver: "awslogs", options: region: string}`, wantErr: "logConfiguration.options.region"},
 	}
 
@@ -57,6 +58,36 @@ func TestParseContainerDefinition_RequiresNameAndImage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := parseContainerDefinition(ctx.CompileString(tt.value))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestParseContainerDefinition_ValidatesRestartPolicy(t *testing.T) {
+	tooManyExitCodes := strings.Repeat("1,", 50) + "1"
+	tests := []struct {
+		name    string
+		policy  string
+		wantErr string
+	}{
+		{name: "requires enabled", policy: `{restartAttemptPeriod: 60}`, wantErr: "restartPolicy.enabled is required"},
+		{name: "minimum period", policy: `{enabled: true, restartAttemptPeriod: 59}`, wantErr: "between 60 and 1800"},
+		{name: "maximum period", policy: `{enabled: true, restartAttemptPeriod: 1801}`, wantErr: "between 60 and 1800"},
+		{name: "exit code range", policy: `{enabled: true, ignoredExitCodes: [256]}`, wantErr: "between 0 and 255"},
+		{name: "exit code count", policy: `{enabled: true, ignoredExitCodes: [` + tooManyExitCodes + `]}`, wantErr: "at most 50"},
+	}
+
+	ctx := cuecontext.New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := ctx.CompileString(`{name: "app", image: "app:latest", restartPolicy: ` + tt.policy + `}`)
+			if err := value.Err(); err != nil {
+				t.Fatalf("compile test value: %v", err)
+			}
+
+			_, err := parseContainerDefinition(value)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
 			}
@@ -350,6 +381,11 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 						softLimit: 1024
 						hardLimit: 2048
 					}]
+					restartPolicy: {
+						enabled: true
+						ignoredExitCodes: [143]
+						restartAttemptPeriod: 60
+					}
 					logConfiguration: {
 						logDriver: "awslogs"
 						options: {
@@ -446,6 +482,12 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 
 	if len(cd.Ulimits) != 1 || cd.Ulimits[0] != (Ulimit{Name: "nofile", SoftLimit: 1024, HardLimit: 2048}) {
 		t.Errorf("unexpected ulimits: %+v", cd.Ulimits)
+	}
+	if cd.RestartPolicy == nil || !cd.RestartPolicy.Enabled || cd.RestartPolicy.RestartAttemptPeriod != 60 {
+		t.Fatalf("unexpected restart policy: %+v", cd.RestartPolicy)
+	}
+	if len(cd.RestartPolicy.IgnoredExitCodes) != 1 || cd.RestartPolicy.IgnoredExitCodes[0] != 143 {
+		t.Errorf("unexpected ignored exit codes: %v", cd.RestartPolicy.IgnoredExitCodes)
 	}
 
 	if cd.LogConfiguration == nil {
