@@ -44,8 +44,9 @@ type hookLogsClient interface {
 
 // HookExecutor runs deployment hooks
 type HookExecutor struct {
-	ecsClient        hookECSClient
-	cloudwatchClient hookLogsClient
+	ecsClient          hookECSClient
+	cloudwatchClient   hookLogsClient
+	waitBeforeLogRetry func(context.Context, time.Duration) error
 }
 
 func NewHookExecutor(ecsClient *awsclient.ECSClient, cwClient *awsclient.CloudWatchLogsClient) *HookExecutor {
@@ -268,11 +269,40 @@ func (e *HookExecutor) fetchHookLogs(ctx context.Context, taskDefArn, taskID str
 		logStream = fmt.Sprintf("ecs/%s/%s", containerName, taskID)
 	}
 
-	logs, err := e.cloudwatchClient.GetLogEvents(ctx, logGroup, logStream, 50)
-	if err != nil {
-		log.Debug("failed to fetch hook logs", "error", err, "logGroup", logGroup, "logStream", logStream)
-		return nil
+	const (
+		maxAttempts = 3
+		retryDelay  = time.Second
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		logs, err := e.cloudwatchClient.GetLogEvents(ctx, logGroup, logStream, 50)
+		if err != nil {
+			log.Debug("failed to fetch hook logs", "error", err, "logGroup", logGroup, "logStream", logStream)
+			return nil
+		}
+		if len(logs) > 0 {
+			return logs
+		}
+		if attempt < maxAttempts {
+			if err := e.waitForHookLogRetry(ctx, retryDelay); err != nil {
+				return nil
+			}
+		}
 	}
 
-	return logs
+	return nil
+}
+
+func (e *HookExecutor) waitForHookLogRetry(ctx context.Context, delay time.Duration) error {
+	if e.waitBeforeLogRetry != nil {
+		return e.waitBeforeLogRetry(ctx, delay)
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 
 	awsclient "github.com/x-qdo/ecsmate/internal/aws"
@@ -14,9 +15,10 @@ import (
 )
 
 type fakeHookECSClient struct {
-	waitCalls  int
-	stoppedArn string
-	stopReason string
+	waitCalls      int
+	stoppedArn     string
+	stopReason     string
+	taskDefinition *types.TaskDefinition
 }
 
 func (f *fakeHookECSClient) RunTask(context.Context, *awsclient.RunTaskInput) (*awsclient.RunTaskOutput, error) {
@@ -40,7 +42,19 @@ func (f *fakeHookECSClient) StopTask(_ context.Context, taskArn, reason string) 
 }
 
 func (f *fakeHookECSClient) DescribeTaskDefinition(context.Context, string) (*types.TaskDefinition, error) {
-	return nil, nil
+	return f.taskDefinition, nil
+}
+
+type fakeHookLogsClient struct {
+	calls int
+}
+
+func (f *fakeHookLogsClient) GetLogEvents(context.Context, string, string, int) ([]string, error) {
+	f.calls++
+	if f.calls == 1 {
+		return nil, nil
+	}
+	return []string{"migration complete"}, nil
 }
 
 func TestHookExecutor_StopsTaskWhenWaitFails(t *testing.T) {
@@ -72,5 +86,41 @@ func TestHookExecutor_StopsTaskWhenWaitFails(t *testing.T) {
 	}
 	if ecsClient.waitCalls != 2 {
 		t.Fatalf("expected one deployment wait and one cleanup wait, got %d", ecsClient.waitCalls)
+	}
+}
+
+func TestHookExecutor_RetriesEventuallyConsistentLogs(t *testing.T) {
+	ecsClient := &fakeHookECSClient{taskDefinition: &types.TaskDefinition{
+		ContainerDefinitions: []types.ContainerDefinition{{
+			Name: aws.String("migration"),
+			LogConfiguration: &types.LogConfiguration{
+				LogDriver: types.LogDriverAwslogs,
+				Options: map[string]string{
+					"awslogs-group":         "/ecs/migration",
+					"awslogs-stream-prefix": "ecs",
+				},
+			},
+		}},
+	}}
+	logsClient := &fakeHookLogsClient{}
+	executor := &HookExecutor{
+		ecsClient:        ecsClient,
+		cloudwatchClient: logsClient,
+		waitBeforeLogRetry: func(context.Context, time.Duration) error {
+			return nil
+		},
+	}
+
+	logs := executor.fetchHookLogs(
+		context.Background(),
+		"arn:aws:ecs:eu-west-1:123456789012:task-definition/migration:2",
+		"task-id",
+	)
+
+	if logsClient.calls != 2 {
+		t.Fatalf("expected log retrieval to retry once, got %d calls", logsClient.calls)
+	}
+	if len(logs) != 1 || logs[0] != "migration complete" {
+		t.Fatalf("unexpected logs: %v", logs)
 	}
 }
