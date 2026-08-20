@@ -573,6 +573,22 @@ func (c *ECSClient) WaitForTaskStopped(ctx context.Context, taskArn string, time
 	}
 }
 
+// StopTask stops a running task and records why ecsmate terminated it.
+func (c *ECSClient) StopTask(ctx context.Context, taskArn, reason string) error {
+	input := &ecs.StopTaskInput{
+		Cluster: aws.String(c.cluster),
+		Task:    aws.String(taskArn),
+	}
+	if reason != "" {
+		input.Reason = aws.String(reason)
+	}
+
+	if _, err := c.client.StopTask(ctx, input); err != nil {
+		return fmt.Errorf("failed to stop task %s: %w", taskArn, err)
+	}
+	return nil
+}
+
 // GetTaskExitCode returns the exit code of the main container
 func GetTaskExitCode(task *TaskInfo) (int, error) {
 	if task == nil {

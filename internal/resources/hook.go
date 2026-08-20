@@ -31,10 +31,21 @@ type HookResult struct {
 	Logs       []string
 }
 
+type hookECSClient interface {
+	RunTask(context.Context, *awsclient.RunTaskInput) (*awsclient.RunTaskOutput, error)
+	WaitForTaskStopped(context.Context, string, time.Duration) (*awsclient.TaskInfo, error)
+	StopTask(context.Context, string, string) error
+	DescribeTaskDefinition(context.Context, string) (*types.TaskDefinition, error)
+}
+
+type hookLogsClient interface {
+	GetLogEvents(context.Context, string, string, int) ([]string, error)
+}
+
 // HookExecutor runs deployment hooks
 type HookExecutor struct {
-	ecsClient        *awsclient.ECSClient
-	cloudwatchClient *awsclient.CloudWatchLogsClient
+	ecsClient        hookECSClient
+	cloudwatchClient hookLogsClient
 }
 
 func NewHookExecutor(ecsClient *awsclient.ECSClient, cwClient *awsclient.CloudWatchLogsClient) *HookExecutor {
@@ -118,7 +129,24 @@ func (e *HookExecutor) ExecuteHook(
 
 	taskInfo, err := e.ecsClient.WaitForTaskStopped(ctx, taskArn, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("%s hook: %w", hookType, err)
+		result := &HookResult{
+			TaskArn:  taskArn,
+			TaskID:   taskID,
+			Duration: time.Since(startTime),
+		}
+
+		cleanupErr := e.stopFailedHookTask(ctx, hookType, taskArn)
+		if e.cloudwatchClient != nil {
+			logCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			result.Logs = e.fetchHookLogs(logCtx, taskDefArn, taskID)
+			cancel()
+		}
+
+		waitErr := fmt.Errorf("%s hook: %w", hookType, err)
+		if cleanupErr != nil {
+			return result, fmt.Errorf("%w; cleanup failed: %v", waitErr, cleanupErr)
+		}
+		return result, waitErr
 	}
 
 	duration := time.Since(startTime)
@@ -150,6 +178,21 @@ func (e *HookExecutor) ExecuteHook(
 		"duration", duration.Round(time.Second))
 
 	return result, nil
+}
+
+func (e *HookExecutor) stopFailedHookTask(ctx context.Context, hookType HookType, taskArn string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	reason := fmt.Sprintf("ecsmate %s-hook did not complete", hookType)
+	if err := e.ecsClient.StopTask(cleanupCtx, taskArn, reason); err != nil {
+		return err
+	}
+
+	if _, err := e.ecsClient.WaitForTaskStopped(cleanupCtx, taskArn, 25*time.Second); err != nil {
+		return fmt.Errorf("wait for stopped hook task: %w", err)
+	}
+	return nil
 }
 
 func (e *HookExecutor) buildTaskOverrides(hook *config.Hook) *types.TaskOverride {
