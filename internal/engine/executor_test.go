@@ -87,6 +87,14 @@ func TestBuildExecutionPlan_Empty(t *testing.T) {
 }
 
 func TestBuildExecutionPlan_WithTaskDefs(t *testing.T) {
+	orphanTargetGroup := &resources.TargetGroupResource{
+		Name:   "app-r1",
+		Action: resources.TargetGroupActionDelete,
+	}
+	orphanListenerRule := &resources.ListenerRuleResource{
+		Priority: 1,
+		Action:   resources.ListenerRuleActionDelete,
+	}
 	state := &resources.DesiredState{
 		TaskDefs: map[string]*resources.TaskDefResource{
 			"web": {
@@ -110,6 +118,10 @@ func TestBuildExecutionPlan_WithTaskDefs(t *testing.T) {
 		},
 		Services:       make(map[string]*resources.ServiceResource),
 		ScheduledTasks: make(map[string]*resources.ScheduledTaskResource),
+		TargetGroups: map[string]*resources.TargetGroupResource{
+			"orphan-app-r1": orphanTargetGroup,
+		},
+		ListenerRules: []*resources.ListenerRuleResource{orphanListenerRule},
 	}
 
 	plan, err := BuildExecutionPlan(state)
@@ -119,6 +131,12 @@ func TestBuildExecutionPlan_WithTaskDefs(t *testing.T) {
 
 	if len(plan.TaskDefs) != 2 {
 		t.Errorf("expected 2 task defs, got %d", len(plan.TaskDefs))
+	}
+	if plan.TargetGroups["orphan-app-r1"] != orphanTargetGroup {
+		t.Fatal("expected execution plan to preserve orphan target groups")
+	}
+	if len(plan.ListenerRules) != 1 || plan.ListenerRules[0] != orphanListenerRule {
+		t.Fatal("expected execution plan to preserve orphan listener rules")
 	}
 }
 

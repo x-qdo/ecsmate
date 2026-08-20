@@ -426,6 +426,8 @@ type ExecutionPlan struct {
 	ScheduledTasks   []*resources.ScheduledTaskResource
 	Graph            *DependencyGraph
 	ServiceDiscovery map[string]*resources.ServiceDiscoveryResource
+	TargetGroups     map[string]*resources.TargetGroupResource
+	ListenerRules    []*resources.ListenerRuleResource
 }
 
 func BuildExecutionPlan(state *resources.DesiredState) (*ExecutionPlan, error) {
@@ -434,6 +436,8 @@ func BuildExecutionPlan(state *resources.DesiredState) (*ExecutionPlan, error) {
 		TaskDefs:         make([]*resources.TaskDefResource, 0),
 		ScheduledTasks:   make([]*resources.ScheduledTaskResource, 0),
 		ServiceDiscovery: state.ServiceDiscovery,
+		TargetGroups:     state.TargetGroups,
+		ListenerRules:    state.ListenerRules,
 	}
 
 	for _, td := range state.TaskDefs {

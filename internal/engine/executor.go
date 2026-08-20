@@ -147,6 +147,12 @@ func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster str
 		return fmt.Errorf("failed to deploy services: %w", err)
 	}
 
+	// Orphan target groups must be deleted after listener rules have been
+	// removed and services have detached their load balancers.
+	if err := e.deleteOrphanTargetGroups(ctx, plan); err != nil {
+		return fmt.Errorf("failed to delete orphan target groups: %w", err)
+	}
+
 	if err := e.applyScheduledTasks(ctx, plan); err != nil {
 		return fmt.Errorf("failed to apply scheduled tasks: %w", err)
 	}
@@ -410,15 +416,35 @@ func (e *Executor) applyListenerRules(ctx context.Context, plan *ExecutionPlan, 
 	}
 
 	ingress := plan.Manifest.Ingress
-	if len(ingress.Rules) == 0 {
+	hasOrphans := false
+	for _, resource := range plan.ListenerRules {
+		if resource.Desired == nil && resource.Action == resources.ListenerRuleActionDelete {
+			hasOrphans = true
+			break
+		}
+	}
+	if len(ingress.Rules) == 0 && !hasOrphans {
 		return nil
 	}
 
 	e.tracker.PrintSection("\nListener Rules")
 
-	ruleResources, err := e.listenerRuleManager.BuildResources(ctx, ingress.ListenerArn, ingress.Rules, targetGroupArns, plan.Manifest.Name, plan.Manifest.Tags, nil)
-	if err != nil {
-		return fmt.Errorf("failed to build listener rules: %w", err)
+	var ruleResources []*resources.ListenerRuleResource
+	if len(ingress.Rules) > 0 {
+		var err error
+		ruleResources, err = e.listenerRuleManager.BuildResources(ctx, ingress.ListenerArn, ingress.Rules, targetGroupArns, plan.Manifest.Name, plan.Manifest.Tags, nil)
+		if err != nil {
+			return fmt.Errorf("failed to build listener rules: %w", err)
+		}
+	}
+
+	// BuildResources above intentionally handles only desired rules. Preserve
+	// the ownership-verified orphan resources discovered while planning so an
+	// apply executes the deletes shown by diff.
+	for _, resource := range plan.ListenerRules {
+		if resource.Desired == nil && resource.Action == resources.ListenerRuleActionDelete {
+			ruleResources = append(ruleResources, resource)
+		}
 	}
 
 	for _, resource := range ruleResources {
@@ -438,6 +464,37 @@ func (e *Executor) applyListenerRules(ctx context.Context, plan *ExecutionPlan, 
 		}
 
 		e.tracker.CompleteTask(name, string(resource.Action))
+	}
+
+	return nil
+}
+
+func (e *Executor) deleteOrphanTargetGroups(ctx context.Context, plan *ExecutionPlan) error {
+	if e.targetGroupManager == nil {
+		return nil
+	}
+
+	var orphans []*resources.TargetGroupResource
+	for _, resource := range plan.TargetGroups {
+		if resource.Desired == nil && resource.Action == resources.TargetGroupActionDelete {
+			orphans = append(orphans, resource)
+		}
+	}
+	if len(orphans) == 0 {
+		return nil
+	}
+
+	e.tracker.PrintSection("\nTarget Group Cleanup")
+	for _, resource := range orphans {
+		e.tracker.AddTask(resource.Name, "target-group")
+		e.tracker.StartTask(resource.Name)
+
+		if err := e.targetGroupManager.Apply(ctx, resource); err != nil {
+			e.tracker.FailTask(resource.Name, err.Error())
+			return fmt.Errorf("target group %s: %w", resource.Name, err)
+		}
+
+		e.tracker.CompleteTask(resource.Name, string(resource.Action))
 	}
 
 	return nil

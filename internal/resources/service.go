@@ -277,7 +277,11 @@ func (r *ServiceResource) ToUpdateInput() (*ecs.UpdateServiceInput, error) {
 		input.NetworkConfiguration = buildNetworkConfiguration(svc.NetworkConfiguration)
 	}
 
-	if len(svc.LoadBalancers) > 0 {
+	if len(svc.LoadBalancers) > 0 || (r.Current != nil && len(r.Current.LoadBalancers) > 0) {
+		// A non-nil empty slice is required by UpdateService to detach all
+		// existing load balancers. Leaving this nil omits the API field and
+		// preserves stale target-group attachments.
+		input.LoadBalancers = make([]types.LoadBalancer, 0, len(svc.LoadBalancers))
 		for _, lb := range svc.LoadBalancers {
 			input.LoadBalancers = append(input.LoadBalancers, types.LoadBalancer{
 				TargetGroupArn: aws.String(lb.TargetGroupArn),
