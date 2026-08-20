@@ -1,10 +1,68 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"cuelang.org/go/cue/cuecontext"
 )
+
+func TestParseContainerDefinition_RejectsNonConcreteFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "scalar", body: `cpu: int`, wantErr: "cpu"},
+		{name: "environment", body: `environment: FOO: string`, wantErr: "environment.FOO"},
+		{name: "port mappings", body: `portMappings: [{containerPort: int}]`, wantErr: "portMappings.0.containerPort"},
+		{name: "mount point", body: `mountPoints: [{sourceVolume: string, containerPath: "/data"}]`, wantErr: "mountPoints.0.sourceVolume"},
+		{name: "health check", body: `healthCheck: command: [string]`, wantErr: "healthCheck.command"},
+		{name: "dependency", body: `dependsOn: [{containerName: string, condition: "SUCCESS"}]`, wantErr: "dependsOn.0.containerName"},
+		{name: "Linux capabilities", body: `linuxParameters: capabilities: add: [string]`, wantErr: "linuxParameters.capabilities.add"},
+		{name: "ulimit", body: `ulimits: [{name: "nofile", softLimit: int, hardLimit: 2048}]`, wantErr: "ulimits.0.softLimit"},
+		{name: "log option", body: `logConfiguration: {logDriver: "awslogs", options: region: string}`, wantErr: "logConfiguration.options.region"},
+	}
+
+	ctx := cuecontext.New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := ctx.CompileString(`{name: "app", image: "app:latest", ` + tt.body + `}`)
+			if err := value.Err(); err != nil {
+				t.Fatalf("compile test value: %v", err)
+			}
+
+			_, err := parseContainerDefinition(value)
+			if err == nil {
+				t.Fatal("expected non-concrete field to fail parsing")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error to contain %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestParseContainerDefinition_RequiresNameAndImage(t *testing.T) {
+	ctx := cuecontext.New()
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "missing name", value: `{image: "app:latest"}`, wantErr: "name is required"},
+		{name: "missing image", value: `{name: "app"}`, wantErr: "image is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseContainerDefinition(ctx.CompileString(tt.value))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
 
 func TestParseManifest_Basic(t *testing.T) {
 	ctx := cuecontext.New()

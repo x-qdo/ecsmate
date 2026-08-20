@@ -642,59 +642,132 @@ func parseTaskDefinition(name string, v cue.Value) (TaskDefinition, error) {
 	return td, nil
 }
 
+func extractOptionalString(v cue.Value, path string) (string, bool, error) {
+	value := v.LookupPath(cue.ParsePath(path))
+	if !value.Exists() {
+		return "", false, nil
+	}
+	result, err := value.String()
+	if err != nil {
+		return "", true, err
+	}
+	return result, true, nil
+}
+
+func extractOptionalInt(v cue.Value, path string) (int64, bool, error) {
+	value := v.LookupPath(cue.ParsePath(path))
+	if !value.Exists() {
+		return 0, false, nil
+	}
+	result, err := value.Int64()
+	if err != nil {
+		return 0, true, err
+	}
+	return result, true, nil
+}
+
+func extractOptionalBool(v cue.Value, path string) (bool, bool, error) {
+	value := v.LookupPath(cue.ParsePath(path))
+	if !value.Exists() {
+		return false, false, nil
+	}
+	result, err := value.Bool()
+	if err != nil {
+		return false, true, err
+	}
+	return result, true, nil
+}
+
+func extractOptionalStringSlice(v cue.Value, path string) ([]string, bool, error) {
+	value := v.LookupPath(cue.ParsePath(path))
+	if !value.Exists() {
+		return nil, false, nil
+	}
+	result, err := ExtractStringSlice(v, path)
+	if err != nil {
+		return nil, true, err
+	}
+	return result, true, nil
+}
+
 func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	cd := ContainerDefinition{Essential: true}
+	if err := v.Validate(cue.Concrete(true)); err != nil {
+		return cd, fmt.Errorf("container definition must be concrete: %w", err)
+	}
 
-	if name, err := ExtractString(v, "name"); err == nil {
-		cd.Name = name
+	name, err := ExtractString(v, "name")
+	if err != nil {
+		return cd, fmt.Errorf("name is required: %w", err)
 	}
-	if image, err := ExtractString(v, "image"); err == nil {
-		cd.Image = image
+	cd.Name = name
+
+	image, err := ExtractString(v, "image")
+	if err != nil {
+		return cd, fmt.Errorf("image is required: %w", err)
 	}
-	if cpu, err := ExtractInt(v, "cpu"); err == nil {
+	cd.Image = image
+
+	if cpu, ok, err := extractOptionalInt(v, "cpu"); err != nil {
+		return cd, fmt.Errorf("cpu: %w", err)
+	} else if ok {
 		cd.CPU = int(cpu)
 	}
-	if memory, err := ExtractInt(v, "memory"); err == nil {
+	if memory, ok, err := extractOptionalInt(v, "memory"); err != nil {
+		return cd, fmt.Errorf("memory: %w", err)
+	} else if ok {
 		cd.Memory = int(memory)
 	}
-	if essential, err := ExtractBool(v, "essential"); err == nil {
+	if essential, ok, err := extractOptionalBool(v, "essential"); err != nil {
+		return cd, fmt.Errorf("essential: %w", err)
+	} else if ok {
 		cd.Essential = essential
 	}
-	if wd, err := ExtractString(v, "workingDirectory"); err == nil {
+	if wd, ok, err := extractOptionalString(v, "workingDirectory"); err != nil {
+		return cd, fmt.Errorf("workingDirectory: %w", err)
+	} else if ok {
 		cd.WorkingDirectory = wd
 	}
-	if cmd, err := ExtractStringSlice(v, "command"); err == nil {
+	if cmd, ok, err := extractOptionalStringSlice(v, "command"); err != nil {
+		return cd, fmt.Errorf("command: %w", err)
+	} else if ok {
 		cd.Command = cmd
 	}
-	if ep, err := ExtractStringSlice(v, "entryPoint"); err == nil {
+	if ep, ok, err := extractOptionalStringSlice(v, "entryPoint"); err != nil {
+		return cd, fmt.Errorf("entryPoint: %w", err)
+	} else if ok {
 		cd.EntryPoint = ep
 	}
 
 	env := v.LookupPath(cue.ParsePath("environment"))
 	if env.Exists() {
 		iter, err := env.Fields()
-		if err == nil {
-			for iter.Next() {
-				if val, err := iter.Value().String(); err == nil {
-					key := iter.Selector().String()
-					key = strings.Trim(key, "\"")
-					cd.Environment = append(cd.Environment, KeyValuePair{Name: key, Value: val})
-				}
+		if err != nil {
+			return cd, fmt.Errorf("environment: %w", err)
+		}
+		for iter.Next() {
+			val, err := iter.Value().String()
+			if err != nil {
+				return cd, fmt.Errorf("environment.%s: %w", iter.Selector(), err)
 			}
+			key := strings.Trim(iter.Selector().String(), "\"")
+			cd.Environment = append(cd.Environment, KeyValuePair{Name: key, Value: val})
 		}
 	}
 
 	secrets := v.LookupPath(cue.ParsePath("secrets"))
 	if secrets.Exists() {
 		iter, err := secrets.Fields()
-		if err == nil {
-			for iter.Next() {
-				if val, err := iter.Value().String(); err == nil {
-					key := iter.Selector().String()
-					key = strings.Trim(key, "\"")
-					cd.Secrets = append(cd.Secrets, Secret{Name: key, ValueFrom: val})
-				}
+		if err != nil {
+			return cd, fmt.Errorf("secrets: %w", err)
+		}
+		for iter.Next() {
+			val, err := iter.Value().String()
+			if err != nil {
+				return cd, fmt.Errorf("secrets.%s: %w", iter.Selector(), err)
 			}
+			key := strings.Trim(iter.Selector().String(), "\"")
+			cd.Secrets = append(cd.Secrets, Secret{Name: key, ValueFrom: val})
 		}
 	}
 
@@ -702,26 +775,38 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	ports := v.LookupPath(cue.ParsePath("portMappings"))
 	if ports.Exists() {
 		iter, err := ports.List()
-		if err == nil {
-			for iter.Next() {
-				pm := PortMapping{}
-				if cp, err := ExtractInt(iter.Value(), "containerPort"); err == nil {
-					pm.ContainerPort = int(cp)
-				}
-				if hp, err := ExtractInt(iter.Value(), "hostPort"); err == nil {
-					pm.HostPort = int(hp)
-				}
-				if proto, err := ExtractString(iter.Value(), "protocol"); err == nil {
-					pm.Protocol = proto
-				}
-				if name, err := ExtractString(iter.Value(), "name"); err == nil {
-					pm.Name = name
-				}
-				if appProtocol, err := ExtractString(iter.Value(), "appProtocol"); err == nil {
-					pm.AppProtocol = appProtocol
-				}
-				cd.PortMappings = append(cd.PortMappings, pm)
+		if err != nil {
+			return cd, fmt.Errorf("portMappings: %w", err)
+		}
+		for i := 0; iter.Next(); i++ {
+			value := iter.Value()
+			pm := PortMapping{}
+			cp, err := ExtractInt(value, "containerPort")
+			if err != nil {
+				return cd, fmt.Errorf("portMappings[%d].containerPort is required: %w", i, err)
 			}
+			pm.ContainerPort = int(cp)
+			if hp, ok, err := extractOptionalInt(value, "hostPort"); err != nil {
+				return cd, fmt.Errorf("portMappings[%d].hostPort: %w", i, err)
+			} else if ok {
+				pm.HostPort = int(hp)
+			}
+			if protocol, ok, err := extractOptionalString(value, "protocol"); err != nil {
+				return cd, fmt.Errorf("portMappings[%d].protocol: %w", i, err)
+			} else if ok {
+				pm.Protocol = protocol
+			}
+			if name, ok, err := extractOptionalString(value, "name"); err != nil {
+				return cd, fmt.Errorf("portMappings[%d].name: %w", i, err)
+			} else if ok {
+				pm.Name = name
+			}
+			if appProtocol, ok, err := extractOptionalString(value, "appProtocol"); err != nil {
+				return cd, fmt.Errorf("portMappings[%d].appProtocol: %w", i, err)
+			} else if ok {
+				pm.AppProtocol = appProtocol
+			}
+			cd.PortMappings = append(cd.PortMappings, pm)
 		}
 	}
 
@@ -729,20 +814,28 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	mountPoints := v.LookupPath(cue.ParsePath("mountPoints"))
 	if mountPoints.Exists() {
 		iter, err := mountPoints.List()
-		if err == nil {
-			for iter.Next() {
-				mp := MountPoint{}
-				if sourceVolume, err := ExtractString(iter.Value(), "sourceVolume"); err == nil {
-					mp.SourceVolume = sourceVolume
-				}
-				if containerPath, err := ExtractString(iter.Value(), "containerPath"); err == nil {
-					mp.ContainerPath = containerPath
-				}
-				if readOnly, err := ExtractBool(iter.Value(), "readOnly"); err == nil {
-					mp.ReadOnly = readOnly
-				}
-				cd.MountPoints = append(cd.MountPoints, mp)
+		if err != nil {
+			return cd, fmt.Errorf("mountPoints: %w", err)
+		}
+		for i := 0; iter.Next(); i++ {
+			value := iter.Value()
+			mp := MountPoint{}
+			sourceVolume, err := ExtractString(value, "sourceVolume")
+			if err != nil {
+				return cd, fmt.Errorf("mountPoints[%d].sourceVolume is required: %w", i, err)
 			}
+			mp.SourceVolume = sourceVolume
+			containerPath, err := ExtractString(value, "containerPath")
+			if err != nil {
+				return cd, fmt.Errorf("mountPoints[%d].containerPath is required: %w", i, err)
+			}
+			mp.ContainerPath = containerPath
+			if readOnly, ok, err := extractOptionalBool(value, "readOnly"); err != nil {
+				return cd, fmt.Errorf("mountPoints[%d].readOnly: %w", i, err)
+			} else if ok {
+				mp.ReadOnly = readOnly
+			}
+			cd.MountPoints = append(cd.MountPoints, mp)
 		}
 	}
 
@@ -750,19 +843,29 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	healthCheck := v.LookupPath(cue.ParsePath("healthCheck"))
 	if healthCheck.Exists() {
 		cd.HealthCheck = &HealthCheck{}
-		if command, err := ExtractStringSlice(healthCheck, "command"); err == nil {
-			cd.HealthCheck.Command = command
+		command, err := ExtractStringSlice(healthCheck, "command")
+		if err != nil {
+			return cd, fmt.Errorf("healthCheck.command is required: %w", err)
 		}
-		if interval, err := ExtractInt(healthCheck, "interval"); err == nil {
+		cd.HealthCheck.Command = command
+		if interval, ok, err := extractOptionalInt(healthCheck, "interval"); err != nil {
+			return cd, fmt.Errorf("healthCheck.interval: %w", err)
+		} else if ok {
 			cd.HealthCheck.Interval = int(interval)
 		}
-		if timeout, err := ExtractInt(healthCheck, "timeout"); err == nil {
+		if timeout, ok, err := extractOptionalInt(healthCheck, "timeout"); err != nil {
+			return cd, fmt.Errorf("healthCheck.timeout: %w", err)
+		} else if ok {
 			cd.HealthCheck.Timeout = int(timeout)
 		}
-		if retries, err := ExtractInt(healthCheck, "retries"); err == nil {
+		if retries, ok, err := extractOptionalInt(healthCheck, "retries"); err != nil {
+			return cd, fmt.Errorf("healthCheck.retries: %w", err)
+		} else if ok {
 			cd.HealthCheck.Retries = int(retries)
 		}
-		if startPeriod, err := ExtractInt(healthCheck, "startPeriod"); err == nil {
+		if startPeriod, ok, err := extractOptionalInt(healthCheck, "startPeriod"); err != nil {
+			return cd, fmt.Errorf("healthCheck.startPeriod: %w", err)
+		} else if ok {
 			cd.HealthCheck.StartPeriod = int(startPeriod)
 		}
 	}
@@ -771,17 +874,23 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	dependencies := v.LookupPath(cue.ParsePath("dependsOn"))
 	if dependencies.Exists() {
 		iter, err := dependencies.List()
-		if err == nil {
-			for iter.Next() {
-				dependency := ContainerDependency{}
-				if containerName, err := ExtractString(iter.Value(), "containerName"); err == nil {
-					dependency.ContainerName = containerName
-				}
-				if condition, err := ExtractString(iter.Value(), "condition"); err == nil {
-					dependency.Condition = condition
-				}
-				cd.DependsOn = append(cd.DependsOn, dependency)
+		if err != nil {
+			return cd, fmt.Errorf("dependsOn: %w", err)
+		}
+		for i := 0; iter.Next(); i++ {
+			value := iter.Value()
+			dependency := ContainerDependency{}
+			containerName, err := ExtractString(value, "containerName")
+			if err != nil {
+				return cd, fmt.Errorf("dependsOn[%d].containerName is required: %w", i, err)
 			}
+			dependency.ContainerName = containerName
+			condition, err := ExtractString(value, "condition")
+			if err != nil {
+				return cd, fmt.Errorf("dependsOn[%d].condition is required: %w", i, err)
+			}
+			dependency.Condition = condition
+			cd.DependsOn = append(cd.DependsOn, dependency)
 		}
 	}
 
@@ -789,16 +898,22 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	linuxParameters := v.LookupPath(cue.ParsePath("linuxParameters"))
 	if linuxParameters.Exists() {
 		cd.LinuxParameters = &LinuxParameters{}
-		if initProcessEnabled, err := ExtractBool(linuxParameters, "initProcessEnabled"); err == nil {
+		if initProcessEnabled, ok, err := extractOptionalBool(linuxParameters, "initProcessEnabled"); err != nil {
+			return cd, fmt.Errorf("linuxParameters.initProcessEnabled: %w", err)
+		} else if ok {
 			cd.LinuxParameters.InitProcessEnabled = initProcessEnabled
 		}
 		capabilities := linuxParameters.LookupPath(cue.ParsePath("capabilities"))
 		if capabilities.Exists() {
 			cd.LinuxParameters.Capabilities = &KernelCapabilities{}
-			if add, err := ExtractStringSlice(capabilities, "add"); err == nil {
+			if add, ok, err := extractOptionalStringSlice(capabilities, "add"); err != nil {
+				return cd, fmt.Errorf("linuxParameters.capabilities.add: %w", err)
+			} else if ok {
 				cd.LinuxParameters.Capabilities.Add = add
 			}
-			if drop, err := ExtractStringSlice(capabilities, "drop"); err == nil {
+			if drop, ok, err := extractOptionalStringSlice(capabilities, "drop"); err != nil {
+				return cd, fmt.Errorf("linuxParameters.capabilities.drop: %w", err)
+			} else if ok {
 				cd.LinuxParameters.Capabilities.Drop = drop
 			}
 		}
@@ -808,20 +923,28 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 	ulimits := v.LookupPath(cue.ParsePath("ulimits"))
 	if ulimits.Exists() {
 		iter, err := ulimits.List()
-		if err == nil {
-			for iter.Next() {
-				ulimit := Ulimit{}
-				if name, err := ExtractString(iter.Value(), "name"); err == nil {
-					ulimit.Name = name
-				}
-				if softLimit, err := ExtractInt(iter.Value(), "softLimit"); err == nil {
-					ulimit.SoftLimit = int(softLimit)
-				}
-				if hardLimit, err := ExtractInt(iter.Value(), "hardLimit"); err == nil {
-					ulimit.HardLimit = int(hardLimit)
-				}
-				cd.Ulimits = append(cd.Ulimits, ulimit)
+		if err != nil {
+			return cd, fmt.Errorf("ulimits: %w", err)
+		}
+		for i := 0; iter.Next(); i++ {
+			value := iter.Value()
+			ulimit := Ulimit{}
+			name, err := ExtractString(value, "name")
+			if err != nil {
+				return cd, fmt.Errorf("ulimits[%d].name is required: %w", i, err)
 			}
+			ulimit.Name = name
+			softLimit, err := ExtractInt(value, "softLimit")
+			if err != nil {
+				return cd, fmt.Errorf("ulimits[%d].softLimit is required: %w", i, err)
+			}
+			ulimit.SoftLimit = int(softLimit)
+			hardLimit, err := ExtractInt(value, "hardLimit")
+			if err != nil {
+				return cd, fmt.Errorf("ulimits[%d].hardLimit is required: %w", i, err)
+			}
+			ulimit.HardLimit = int(hardLimit)
+			cd.Ulimits = append(cd.Ulimits, ulimit)
 		}
 	}
 
@@ -832,56 +955,70 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 			Options:      make(map[string]string),
 			LogGroupTags: make(map[string]string),
 		}
-		if driver, err := ExtractString(logConfig, "logDriver"); err == nil {
-			cd.LogConfiguration.LogDriver = driver
+		driver, err := ExtractString(logConfig, "logDriver")
+		if err != nil {
+			return cd, fmt.Errorf("logConfiguration.logDriver is required: %w", err)
 		}
+		cd.LogConfiguration.LogDriver = driver
 		opts := logConfig.LookupPath(cue.ParsePath("options"))
 		if opts.Exists() {
 			iter, err := opts.Fields()
-			if err == nil {
-				for iter.Next() {
-					if val, err := iter.Value().String(); err == nil {
-						key := iter.Selector().String()
-						key = strings.Trim(key, "\"")
-						cd.LogConfiguration.Options[key] = val
-					}
+			if err != nil {
+				return cd, fmt.Errorf("logConfiguration.options: %w", err)
+			}
+			for iter.Next() {
+				val, err := iter.Value().String()
+				if err != nil {
+					return cd, fmt.Errorf("logConfiguration.options.%s: %w", iter.Selector(), err)
 				}
+				key := strings.Trim(iter.Selector().String(), "\"")
+				cd.LogConfiguration.Options[key] = val
 			}
 		}
 		// Log group management fields
-		if create, err := ExtractBool(logConfig, "createLogGroup"); err == nil {
+		if create, ok, err := extractOptionalBool(logConfig, "createLogGroup"); err != nil {
+			return cd, fmt.Errorf("logConfiguration.createLogGroup: %w", err)
+		} else if ok {
 			cd.LogConfiguration.CreateLogGroup = create
 		}
-		if retention, err := ExtractInt(logConfig, "retentionInDays"); err == nil {
+		if retention, ok, err := extractOptionalInt(logConfig, "retentionInDays"); err != nil {
+			return cd, fmt.Errorf("logConfiguration.retentionInDays: %w", err)
+		} else if ok {
 			cd.LogConfiguration.RetentionInDays = int(retention)
 		}
-		if kmsKey, err := ExtractString(logConfig, "kmsKeyId"); err == nil {
+		if kmsKey, ok, err := extractOptionalString(logConfig, "kmsKeyId"); err != nil {
+			return cd, fmt.Errorf("logConfiguration.kmsKeyId: %w", err)
+		} else if ok {
 			cd.LogConfiguration.KMSKeyID = kmsKey
 		}
 		secretOpts := logConfig.LookupPath(cue.ParsePath("secretOptions"))
 		if secretOpts.Exists() {
 			iter, err := secretOpts.Fields()
-			if err == nil {
-				for iter.Next() {
-					if val, err := iter.Value().String(); err == nil {
-						key := iter.Selector().String()
-						key = strings.Trim(key, "\"")
-						cd.LogConfiguration.SecretOptions = append(cd.LogConfiguration.SecretOptions, Secret{Name: key, ValueFrom: val})
-					}
+			if err != nil {
+				return cd, fmt.Errorf("logConfiguration.secretOptions: %w", err)
+			}
+			for iter.Next() {
+				val, err := iter.Value().String()
+				if err != nil {
+					return cd, fmt.Errorf("logConfiguration.secretOptions.%s: %w", iter.Selector(), err)
 				}
+				key := strings.Trim(iter.Selector().String(), "\"")
+				cd.LogConfiguration.SecretOptions = append(cd.LogConfiguration.SecretOptions, Secret{Name: key, ValueFrom: val})
 			}
 		}
 		logTags := logConfig.LookupPath(cue.ParsePath("logGroupTags"))
 		if logTags.Exists() {
 			iter, err := logTags.Fields()
-			if err == nil {
-				for iter.Next() {
-					if val, err := iter.Value().String(); err == nil {
-						key := iter.Selector().String()
-						key = strings.Trim(key, "\"")
-						cd.LogConfiguration.LogGroupTags[key] = val
-					}
+			if err != nil {
+				return cd, fmt.Errorf("logConfiguration.logGroupTags: %w", err)
+			}
+			for iter.Next() {
+				val, err := iter.Value().String()
+				if err != nil {
+					return cd, fmt.Errorf("logConfiguration.logGroupTags.%s: %w", iter.Selector(), err)
 				}
+				key := strings.Trim(iter.Selector().String(), "\"")
+				cd.LogConfiguration.LogGroupTags[key] = val
 			}
 		}
 		subscriptionFilters := logConfig.LookupPath(cue.ParsePath("subscriptionFilters"))
@@ -908,13 +1045,19 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 				}
 				filter.DestinationArn = destinationArn
 
-				if pattern, err := ExtractString(filterValue, "filterPattern"); err == nil {
+				if pattern, ok, err := extractOptionalString(filterValue, "filterPattern"); err != nil {
+					return cd, fmt.Errorf("subscriptionFilters[%d].filterPattern: %w", i, err)
+				} else if ok {
 					filter.FilterPattern = pattern
 				}
-				if roleArn, err := ExtractString(filterValue, "roleArn"); err == nil {
+				if roleArn, ok, err := extractOptionalString(filterValue, "roleArn"); err != nil {
+					return cd, fmt.Errorf("subscriptionFilters[%d].roleArn: %w", i, err)
+				} else if ok {
 					filter.RoleArn = roleArn
 				}
-				if distribution, err := ExtractString(filterValue, "distribution"); err == nil {
+				if distribution, ok, err := extractOptionalString(filterValue, "distribution"); err != nil {
+					return cd, fmt.Errorf("subscriptionFilters[%d].distribution: %w", i, err)
+				} else if ok {
 					filter.Distribution = distribution
 				}
 
