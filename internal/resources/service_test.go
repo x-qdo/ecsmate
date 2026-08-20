@@ -123,6 +123,36 @@ func TestServiceResource_ToUpdateInput(t *testing.T) {
 	}
 }
 
+func TestServiceResource_ToUpdateInput_ClearsExistingLoadBalancers(t *testing.T) {
+	resource := &ServiceResource{
+		Name: "telemetry",
+		Desired: &config.Service{
+			Name:         "telemetry",
+			Cluster:      "test-cluster",
+			DesiredCount: 0,
+		},
+		Current: &types.Service{
+			LoadBalancers: []types.LoadBalancer{{
+				TargetGroupArn: aws.String("arn:aws:elasticloadbalancing:eu-west-1:123456789012:targetgroup/telemetry/123"),
+				ContainerName:  aws.String("jaeger"),
+				ContainerPort:  aws.Int32(16686),
+			}},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:eu-west-1:123456789012:task-definition/telemetry:2",
+	}
+
+	input, err := resource.ToUpdateInput()
+	if err != nil {
+		t.Fatalf("failed to create update input: %v", err)
+	}
+	if input.LoadBalancers == nil {
+		t.Fatal("expected a non-nil empty load balancer list to clear the existing attachment")
+	}
+	if len(input.LoadBalancers) != 0 {
+		t.Fatalf("expected no desired load balancers, got %d", len(input.LoadBalancers))
+	}
+}
+
 func TestServiceResource_DetermineAction_Create(t *testing.T) {
 	resource := &ServiceResource{
 		Name: "web",
