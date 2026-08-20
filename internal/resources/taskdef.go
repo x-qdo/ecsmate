@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -544,34 +545,16 @@ func (resource *TaskDefResource) hasChanges() bool {
 		return true
 	}
 
-	current := resource.Current
-	desired := resource.Desired
-
-	if aws.ToString(current.Cpu) != desired.CPU {
-		return true
-	}
-	if aws.ToString(current.Memory) != desired.Memory {
-		return true
-	}
-	if string(current.NetworkMode) != desired.NetworkMode {
-		return true
-	}
-	if aws.ToString(current.ExecutionRoleArn) != desired.ExecutionRoleArn {
-		return true
-	}
-	if aws.ToString(current.TaskRoleArn) != desired.TaskRoleArn {
+	if resource.hasTaskLevelChanges() {
 		return true
 	}
 
-	if len(current.ContainerDefinitions) != len(desired.ContainerDefinitions) {
+	if len(resource.Current.ContainerDefinitions) != len(resource.Desired.ContainerDefinitions) {
 		return true
 	}
 
-	for i, cd := range desired.ContainerDefinitions {
-		if i >= len(current.ContainerDefinitions) {
-			return true
-		}
-		if hasContainerChanges(current.ContainerDefinitions[i], cd) {
+	for i, cd := range resource.Desired.ContainerDefinitions {
+		if hasContainerChanges(resource.Current.ContainerDefinitions[i], cd) {
 			return true
 		}
 	}
@@ -580,58 +563,9 @@ func (resource *TaskDefResource) hasChanges() bool {
 }
 
 func hasContainerChanges(current types.ContainerDefinition, desired config.ContainerDefinition) bool {
-	if aws.ToString(current.Name) != desired.Name {
-		return true
-	}
-	if aws.ToString(current.Image) != desired.Image {
-		return true
-	}
-	if int(current.Cpu) != desired.CPU {
-		return true
-	}
-	if int(aws.ToInt32(current.Memory)) != desired.Memory && desired.Memory != 0 {
-		return true
-	}
-	if !stringSliceEqual(current.Command, desired.Command) {
-		return true
-	}
-	if !stringSliceEqual(current.EntryPoint, desired.EntryPoint) {
-		return true
-	}
-
-	if len(current.Environment) != len(desired.Environment) {
-		return true
-	}
-	for _, dEnv := range desired.Environment {
-		found := false
-		for _, cEnv := range current.Environment {
-			if aws.ToString(cEnv.Name) == dEnv.Name && aws.ToString(cEnv.Value) == dEnv.Value {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
-	}
-
-	if len(current.Secrets) != len(desired.Secrets) {
-		return true
-	}
-	for _, dSecret := range desired.Secrets {
-		found := false
-		for _, cSecret := range current.Secrets {
-			if aws.ToString(cSecret.Name) == dSecret.Name && aws.ToString(cSecret.ValueFrom) == dSecret.ValueFrom {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
-	}
-
-	return false
+	desiredContainer := convertContainerDefinition(desired)
+	normalizeECSAssignedContainerDefaults(&current, &desiredContainer)
+	return !reflect.DeepEqual(current, desiredContainer)
 }
 
 // IsImageOnlyChange returns true if the only difference between current and desired
@@ -663,7 +597,11 @@ func (resource *TaskDefResource) hasTaskLevelChanges() bool {
 	if aws.ToString(current.Memory) != desired.Memory {
 		return true
 	}
-	if string(current.NetworkMode) != desired.NetworkMode {
+	currentNetworkMode := string(current.NetworkMode)
+	if desired.NetworkMode == "" && current.NetworkMode == types.NetworkModeBridge {
+		currentNetworkMode = ""
+	}
+	if currentNetworkMode != desired.NetworkMode {
 		return true
 	}
 	if aws.ToString(current.ExecutionRoleArn) != desired.ExecutionRoleArn {
@@ -729,6 +667,18 @@ func compareContainerForImageOnly(current types.ContainerDefinition, desired con
 }
 
 func normalizeECSAssignedContainerDefaults(current, desired *types.ContainerDefinition) {
+	// The SDK structs contain slices and nested pointers, so clone every value
+	// normalized below to avoid mutating the discovered or desired state.
+	current.PortMappings = append([]types.PortMapping(nil), current.PortMappings...)
+	current.Environment = append([]types.KeyValuePair(nil), current.Environment...)
+	desired.Environment = append([]types.KeyValuePair(nil), desired.Environment...)
+	current.Secrets = append([]types.Secret(nil), current.Secrets...)
+	desired.Secrets = append([]types.Secret(nil), desired.Secrets...)
+	if current.HealthCheck != nil {
+		healthCheck := *current.HealthCheck
+		current.HealthCheck = &healthCheck
+	}
+
 	for i := range current.PortMappings {
 		if i >= len(desired.PortMappings) {
 			return
@@ -741,7 +691,40 @@ func normalizeECSAssignedContainerDefaults(current, desired *types.ContainerDefi
 			aws.ToInt32(currentPort.HostPort) == aws.ToInt32(currentPort.ContainerPort) {
 			currentPort.HostPort = nil
 		}
+		if desiredPort.Protocol == "" && currentPort.Protocol == types.TransportProtocolTcp {
+			currentPort.Protocol = ""
+		}
 	}
+
+	if current.HealthCheck != nil && desired.HealthCheck != nil {
+		if desired.HealthCheck.Interval == nil && aws.ToInt32(current.HealthCheck.Interval) == 30 {
+			current.HealthCheck.Interval = nil
+		}
+		if desired.HealthCheck.Timeout == nil && aws.ToInt32(current.HealthCheck.Timeout) == 5 {
+			current.HealthCheck.Timeout = nil
+		}
+		if desired.HealthCheck.Retries == nil && aws.ToInt32(current.HealthCheck.Retries) == 3 {
+			current.HealthCheck.Retries = nil
+		}
+		if desired.HealthCheck.StartPeriod == nil && aws.ToInt32(current.HealthCheck.StartPeriod) == 0 {
+			current.HealthCheck.StartPeriod = nil
+		}
+	}
+
+	// ECS treats environment variables and secrets as name-addressed values;
+	// their response order must not create a new task-definition revision.
+	sort.Slice(current.Environment, func(i, j int) bool {
+		return aws.ToString(current.Environment[i].Name) < aws.ToString(current.Environment[j].Name)
+	})
+	sort.Slice(desired.Environment, func(i, j int) bool {
+		return aws.ToString(desired.Environment[i].Name) < aws.ToString(desired.Environment[j].Name)
+	})
+	sort.Slice(current.Secrets, func(i, j int) bool {
+		return aws.ToString(current.Secrets[i].Name) < aws.ToString(current.Secrets[j].Name)
+	})
+	sort.Slice(desired.Secrets, func(i, j int) bool {
+		return aws.ToString(desired.Secrets[i].Name) < aws.ToString(desired.Secrets[j].Name)
+	})
 }
 
 func compatibilitiesEqual(current []types.Compatibility, desired []string) bool {
