@@ -1,10 +1,99 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"cuelang.org/go/cue/cuecontext"
 )
+
+func TestParseContainerDefinition_RejectsNonConcreteFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "scalar", body: `cpu: int`, wantErr: "cpu"},
+		{name: "environment", body: `environment: FOO: string`, wantErr: "environment.FOO"},
+		{name: "port mappings", body: `portMappings: [{containerPort: int}]`, wantErr: "portMappings.0.containerPort"},
+		{name: "mount point", body: `mountPoints: [{sourceVolume: string, containerPath: "/data"}]`, wantErr: "mountPoints.0.sourceVolume"},
+		{name: "health check", body: `healthCheck: command: [string]`, wantErr: "healthCheck.command"},
+		{name: "dependency", body: `dependsOn: [{containerName: string, condition: "SUCCESS"}]`, wantErr: "dependsOn.0.containerName"},
+		{name: "Linux capabilities", body: `linuxParameters: capabilities: add: [string]`, wantErr: "linuxParameters.capabilities.add"},
+		{name: "ulimit", body: `ulimits: [{name: "nofile", softLimit: int, hardLimit: 2048}]`, wantErr: "ulimits.0.softLimit"},
+		{name: "restart policy", body: `restartPolicy: {enabled: bool}`, wantErr: "restartPolicy.enabled"},
+		{name: "log option", body: `logConfiguration: {logDriver: "awslogs", options: region: string}`, wantErr: "logConfiguration.options.region"},
+	}
+
+	ctx := cuecontext.New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := ctx.CompileString(`{name: "app", image: "app:latest", ` + tt.body + `}`)
+			if err := value.Err(); err != nil {
+				t.Fatalf("compile test value: %v", err)
+			}
+
+			_, err := parseContainerDefinition(value)
+			if err == nil {
+				t.Fatal("expected non-concrete field to fail parsing")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error to contain %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestParseContainerDefinition_RequiresNameAndImage(t *testing.T) {
+	ctx := cuecontext.New()
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "missing name", value: `{image: "app:latest"}`, wantErr: "name is required"},
+		{name: "missing image", value: `{name: "app"}`, wantErr: "image is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseContainerDefinition(ctx.CompileString(tt.value))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestParseContainerDefinition_ValidatesRestartPolicy(t *testing.T) {
+	tooManyExitCodes := strings.Repeat("1,", 50) + "1"
+	tests := []struct {
+		name    string
+		policy  string
+		wantErr string
+	}{
+		{name: "requires enabled", policy: `{restartAttemptPeriod: 60}`, wantErr: "restartPolicy.enabled is required"},
+		{name: "minimum period", policy: `{enabled: true, restartAttemptPeriod: 59}`, wantErr: "between 60 and 1800"},
+		{name: "maximum period", policy: `{enabled: true, restartAttemptPeriod: 1801}`, wantErr: "between 60 and 1800"},
+		{name: "exit code range", policy: `{enabled: true, ignoredExitCodes: [256]}`, wantErr: "between 0 and 255"},
+		{name: "exit code count", policy: `{enabled: true, ignoredExitCodes: [` + tooManyExitCodes + `]}`, wantErr: "at most 50"},
+	}
+
+	ctx := cuecontext.New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := ctx.CompileString(`{name: "app", image: "app:latest", restartPolicy: ` + tt.policy + `}`)
+			if err := value.Err(); err != nil {
+				t.Fatalf("compile test value: %v", err)
+			}
+
+			_, err := parseContainerDefinition(value)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
 
 func TestParseManifest_Basic(t *testing.T) {
 	ctx := cuecontext.New()
@@ -261,7 +350,42 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 						containerPort: 8080
 						hostPort: 8080
 						protocol: "tcp"
+						name: "http"
+						appProtocol: "http"
 					}]
+					mountPoints: [{
+						sourceVolume: "data"
+						containerPath: "/data"
+						readOnly: true
+					}]
+					healthCheck: {
+						command: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+						interval: 30
+						timeout: 5
+						retries: 3
+						startPeriod: 10
+					}
+					dependsOn: [{
+						containerName: "init"
+						condition: "SUCCESS"
+					}]
+					linuxParameters: {
+						initProcessEnabled: true
+						capabilities: {
+							add: ["SYS_PTRACE"]
+							drop: ["NET_RAW"]
+						}
+					}
+					ulimits: [{
+						name: "nofile"
+						softLimit: 1024
+						hardLimit: 2048
+					}]
+					restartPolicy: {
+						enabled: true
+						ignoredExitCodes: [143]
+						restartAttemptPeriod: 60
+					}
 					logConfiguration: {
 						logDriver: "awslogs"
 						options: {
@@ -329,6 +453,41 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 	}
 	if cd.PortMappings[0].ContainerPort != 8080 {
 		t.Errorf("expected containerPort 8080, got %d", cd.PortMappings[0].ContainerPort)
+	}
+	if cd.PortMappings[0].Name != "http" || cd.PortMappings[0].AppProtocol != "http" {
+		t.Errorf("expected named HTTP port mapping, got name=%q appProtocol=%q", cd.PortMappings[0].Name, cd.PortMappings[0].AppProtocol)
+	}
+
+	if len(cd.MountPoints) != 1 || cd.MountPoints[0] != (MountPoint{SourceVolume: "data", ContainerPath: "/data", ReadOnly: true}) {
+		t.Errorf("unexpected mount points: %+v", cd.MountPoints)
+	}
+
+	if cd.HealthCheck == nil {
+		t.Fatal("expected health check")
+	}
+	if len(cd.HealthCheck.Command) != 2 || cd.HealthCheck.Interval != 30 || cd.HealthCheck.Timeout != 5 || cd.HealthCheck.Retries != 3 || cd.HealthCheck.StartPeriod != 10 {
+		t.Errorf("unexpected health check: %+v", cd.HealthCheck)
+	}
+
+	if len(cd.DependsOn) != 1 || cd.DependsOn[0] != (ContainerDependency{ContainerName: "init", Condition: "SUCCESS"}) {
+		t.Errorf("unexpected container dependencies: %+v", cd.DependsOn)
+	}
+
+	if cd.LinuxParameters == nil || !cd.LinuxParameters.InitProcessEnabled || cd.LinuxParameters.Capabilities == nil {
+		t.Fatalf("unexpected Linux parameters: %+v", cd.LinuxParameters)
+	}
+	if len(cd.LinuxParameters.Capabilities.Add) != 1 || cd.LinuxParameters.Capabilities.Add[0] != "SYS_PTRACE" || len(cd.LinuxParameters.Capabilities.Drop) != 1 || cd.LinuxParameters.Capabilities.Drop[0] != "NET_RAW" {
+		t.Errorf("unexpected Linux capabilities: %+v", cd.LinuxParameters.Capabilities)
+	}
+
+	if len(cd.Ulimits) != 1 || cd.Ulimits[0] != (Ulimit{Name: "nofile", SoftLimit: 1024, HardLimit: 2048}) {
+		t.Errorf("unexpected ulimits: %+v", cd.Ulimits)
+	}
+	if cd.RestartPolicy == nil || !cd.RestartPolicy.Enabled || cd.RestartPolicy.RestartAttemptPeriod != 60 {
+		t.Fatalf("unexpected restart policy: %+v", cd.RestartPolicy)
+	}
+	if len(cd.RestartPolicy.IgnoredExitCodes) != 1 || cd.RestartPolicy.IgnoredExitCodes[0] != 143 {
+		t.Errorf("unexpected ignored exit codes: %v", cd.RestartPolicy.IgnoredExitCodes)
 	}
 
 	if cd.LogConfiguration == nil {

@@ -604,6 +604,37 @@ func TestDependencyGraph_PropagateUpdate_TaskDefinition(t *testing.T) {
 	}
 }
 
+func TestDependencyGraph_PropagateUpdate_HookTaskDefinition(t *testing.T) {
+	state := &resources.DesiredState{
+		TaskDefs: map[string]*resources.TaskDefResource{
+			"app":       {Name: "app", Action: resources.TaskDefActionNoop},
+			"migration": {Name: "migration", Action: resources.TaskDefActionUpdate},
+		},
+		Services: map[string]*resources.ServiceResource{
+			"api": {
+				Name:   "api",
+				Action: resources.ServiceActionNoop,
+				Desired: &config.Service{
+					TaskDefinition: "app",
+					Hooks: &config.Hooks{
+						PreHook: &config.Hook{TaskDefinition: "migration"},
+					},
+				},
+			},
+		},
+	}
+
+	graph, err := BuildResourceGraph(state)
+	if err != nil {
+		t.Fatalf("build graph: %v", err)
+	}
+	changes := graph.PropagateChanges()
+	change := changes["Service/api"]
+	if change == nil || change.Action != "UPDATE" {
+		t.Fatalf("expected migration task definition update to propagate to service, got %+v", change)
+	}
+}
+
 func TestDependencyGraph_PropagateRecreate_TargetGroup(t *testing.T) {
 	tgArn := "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/api-tg/abc"
 	state := &resources.DesiredState{

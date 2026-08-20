@@ -58,6 +58,66 @@ manifest: schema.#Manifest & {
 }`,
 			wantErr: false,
 		},
+		{
+			name: "valid container restart policy",
+			cueFile: `package test
+import "github.com/x-qdo/ecsmate/pkg/cue:schema"
+manifest: schema.#Manifest & {
+	name: "test"
+	taskDefinitions: app: {
+		type: "managed"
+		family: "test-app"
+		containerDefinitions: [{
+			name: "messenger"
+			image: "messenger:latest"
+			restartPolicy: {
+				enabled: true
+				ignoredExitCodes: [143]
+				restartAttemptPeriod: 60
+			}
+		}]
+	}
+}`,
+			wantErr: false,
+		},
+		{
+			name: "invalid container restart period",
+			cueFile: `package test
+import "github.com/x-qdo/ecsmate/pkg/cue:schema"
+manifest: schema.#Manifest & {
+	name: "test"
+	taskDefinitions: app: {
+		type: "managed"
+		family: "test-app"
+		containerDefinitions: [{
+			name: "messenger"
+			image: "messenger:latest"
+			restartPolicy: {enabled: true, restartAttemptPeriod: 59}
+		}]
+	}
+}`,
+			wantErr: true,
+			errMsg:  "empty disjunction",
+		},
+		{
+			name: "invalid ignored exit code",
+			cueFile: `package test
+import "github.com/x-qdo/ecsmate/pkg/cue:schema"
+manifest: schema.#Manifest & {
+	name: "test"
+	taskDefinitions: app: {
+		type: "managed"
+		family: "test-app"
+		containerDefinitions: [{
+			name: "messenger"
+			image: "messenger:latest"
+			restartPolicy: {enabled: true, ignoredExitCodes: [256]}
+		}]
+	}
+}`,
+			wantErr: true,
+			errMsg:  "empty disjunction",
+		},
 	}
 
 	for _, tt := range tests {

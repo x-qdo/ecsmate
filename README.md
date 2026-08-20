@@ -205,6 +205,22 @@ taskDefinitions: {
 }
 ```
 
+Long-running workers that intentionally exit after processing for a fixed time
+can use the native ECS container restart policy instead of replacing the whole
+task:
+
+```cue
+restartPolicy: {
+  enabled: true
+  restartAttemptPeriod: 60 // omit to use the ECS default of 300 seconds
+  // ignoredExitCodes: [143] // these exit codes are not restarted
+}
+```
+
+`restartAttemptPeriod` accepts 60–1800 seconds. `ignoredExitCodes` accepts up to
+50 values in the range 0–255. To restart a worker after a normal time-limit exit,
+do not include exit code `0` in `ignoredExitCodes`.
+
 Merged example:
 ```cue
 taskDefinitions: {

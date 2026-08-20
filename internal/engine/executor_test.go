@@ -159,6 +159,185 @@ func TestResolveIngressTargetGroups_AddsLoadBalancer(t *testing.T) {
 	}
 }
 
+func TestExecutor_RefreshTaskDefinitionRefs_RecalculatesIngressService(t *testing.T) {
+	const (
+		currentTaskDef = "arn:aws:ecs:eu-west-1:123456789012:task-definition/app:1"
+		updatedTaskDef = "arn:aws:ecs:eu-west-1:123456789012:task-definition/app:2"
+		targetGroupArn = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:targetgroup/app/123"
+	)
+
+	desired := config.Service{
+		Name:           "app",
+		Cluster:        "cluster",
+		TaskDefinition: "app",
+		DesiredCount:   1,
+	}
+	service := &resources.ServiceResource{
+		Name:              "app",
+		Desired:           &desired,
+		TaskDefinitionArn: currentTaskDef,
+		Action:            resources.ServiceActionUpdate,
+		PropagationReason: "task definition updated",
+		Current: &types.Service{
+			TaskDefinition: aws.String(currentTaskDef),
+			DesiredCount:   1,
+			LoadBalancers: []types.LoadBalancer{{
+				TargetGroupArn: aws.String(targetGroupArn),
+				ContainerName:  aws.String("app"),
+				ContainerPort:  aws.Int32(8080),
+			}},
+		},
+	}
+
+	graph := NewDependencyGraph()
+	graph.AddNode("app", service)
+	plan := &ExecutionPlan{
+		Manifest: &config.Manifest{
+			Services: map[string]config.Service{"app": desired},
+			Ingress: &config.Ingress{Rules: []config.IngressRule{{
+				Service: &config.IngressServiceBackend{
+					Name:          "app",
+					ContainerName: "app",
+					ContainerPort: 8080,
+				},
+			}}},
+		},
+		TaskDefs: []*resources.TaskDefResource{{
+			Name:        "app",
+			ResolvedArn: updatedTaskDef,
+		}},
+		Graph: graph,
+	}
+
+	executor := &Executor{}
+	executor.resolveIngressTargetGroups(plan, map[int]string{0: targetGroupArn})
+	if service.Action != resources.ServiceActionUpdate {
+		t.Fatalf("expected ingress resolution to preserve the propagated UPDATE, got %s", service.Action)
+	}
+
+	executor.refreshTaskDefinitionRefs(plan)
+
+	if service.TaskDefinitionArn != updatedTaskDef {
+		t.Fatalf("expected refreshed task definition ARN %q, got %q", updatedTaskDef, service.TaskDefinitionArn)
+	}
+	if service.Action != resources.ServiceActionUpdate {
+		t.Fatalf("expected refreshed task definition to recalculate the service as UPDATE, got %s", service.Action)
+	}
+}
+
+func TestExecutor_PreservesHookTaskDefinitionUpdateForIngressService(t *testing.T) {
+	const (
+		appTaskDef     = "arn:aws:ecs:eu-west-1:123456789012:task-definition/app:2"
+		targetGroupArn = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:targetgroup/app/123"
+	)
+
+	desired := config.Service{
+		Name:           "app",
+		Cluster:        "cluster",
+		TaskDefinition: "app",
+		DesiredCount:   1,
+		Hooks: &config.Hooks{
+			PreHook: &config.Hook{TaskDefinition: "migration"},
+		},
+	}
+	service := &resources.ServiceResource{
+		Name:              "app",
+		Desired:           &desired,
+		TaskDefinitionArn: appTaskDef,
+		Action:            resources.ServiceActionUpdate,
+		PropagationReason: "task definition updated",
+		Current: &types.Service{
+			TaskDefinition: aws.String(appTaskDef),
+			DesiredCount:   1,
+			LoadBalancers: []types.LoadBalancer{{
+				TargetGroupArn: aws.String(targetGroupArn),
+				ContainerName:  aws.String("app"),
+				ContainerPort:  aws.Int32(8080),
+			}},
+		},
+	}
+
+	graph := NewDependencyGraph()
+	graph.AddNode("app", service)
+	plan := &ExecutionPlan{
+		Manifest: &config.Manifest{
+			Services: map[string]config.Service{"app": desired},
+			Ingress: &config.Ingress{Rules: []config.IngressRule{{
+				Service: &config.IngressServiceBackend{
+					Name:          "app",
+					ContainerName: "app",
+					ContainerPort: 8080,
+				},
+			}}},
+		},
+		TaskDefs: []*resources.TaskDefResource{
+			{Name: "app", ResolvedArn: appTaskDef},
+			{Name: "migration", ResolvedArn: "arn:aws:ecs:eu-west-1:123456789012:task-definition/migration:3"},
+		},
+		Graph: graph,
+	}
+
+	executor := &Executor{}
+	executor.resolveIngressTargetGroups(plan, map[int]string{0: targetGroupArn})
+	executor.refreshTaskDefinitionRefs(plan)
+
+	if service.Action != resources.ServiceActionUpdate {
+		t.Fatalf("expected hook task definition propagation to remain UPDATE, got %s", service.Action)
+	}
+	if service.PropagationReason != "task definition updated" {
+		t.Fatalf("expected hook propagation reason to be retained, got %q", service.PropagationReason)
+	}
+}
+
+func TestExecutor_RefreshTaskDefinitionRefs_PreservesFailedDeploymentUpdate(t *testing.T) {
+	const taskDefArn = "arn:aws:ecs:eu-west-1:123456789012:task-definition/app:2"
+
+	desired := config.Service{
+		Name:           "app",
+		Cluster:        "cluster",
+		TaskDefinition: "app",
+		DesiredCount:   1,
+	}
+	service := &resources.ServiceResource{
+		Name:              "app",
+		Desired:           &desired,
+		TaskDefinitionArn: taskDefArn,
+		Action:            resources.ServiceActionUpdate,
+		Current: &types.Service{
+			TaskDefinition: aws.String(taskDefArn),
+			DesiredCount:   1,
+			Deployments: []types.Deployment{{
+				Id:           aws.String("ecs-svc/failed"),
+				Status:       aws.String("PRIMARY"),
+				RolloutState: types.DeploymentRolloutStateFailed,
+			}},
+		},
+	}
+
+	graph := NewDependencyGraph()
+	graph.AddNode("app", service)
+	plan := &ExecutionPlan{
+		TaskDefs: []*resources.TaskDefResource{{
+			Name:        "app",
+			ResolvedArn: taskDefArn,
+		}},
+		Graph: graph,
+	}
+
+	(&Executor{}).refreshTaskDefinitionRefs(plan)
+
+	if service.Action != resources.ServiceActionUpdate {
+		t.Fatalf("expected failed primary deployment to remain UPDATE, got %s", service.Action)
+	}
+	input, err := service.ToUpdateInput()
+	if err != nil {
+		t.Fatalf("build update input: %v", err)
+	}
+	if !input.ForceNewDeployment {
+		t.Fatal("expected failed primary deployment retry to force a new deployment")
+	}
+}
+
 func TestBuildExecutionPlan_WithServicesNoDeps(t *testing.T) {
 	state := &resources.DesiredState{
 		TaskDefs: make(map[string]*resources.TaskDefResource),

@@ -285,8 +285,12 @@ func (e *Executor) refreshTaskDefinitionRefs(plan *ExecutionPlan) {
 				continue
 			}
 			if arn, ok := taskDefArns[taskDefName]; ok && arn != "" {
+				if svc.TaskDefinitionArn == arn {
+					continue
+				}
 				log.Debug("refreshing service task definition", "service", node.Name, "taskDef", taskDefName, "arn", arn)
 				svc.TaskDefinitionArn = arn
+				svc.RecalculateAction()
 			}
 		}
 	}
@@ -1005,6 +1009,8 @@ func (e *Executor) resolveIngressTargetGroups(plan *ExecutionPlan, targetGroupAr
 		if !ok {
 			continue
 		}
+		previousAction := svc.Action
+		previousPropagationReason := svc.PropagationReason
 
 		desiredName := ""
 		desiredCluster := ""
@@ -1028,6 +1034,12 @@ func (e *Executor) resolveIngressTargetGroups(plan *ExecutionPlan, targetGroupAr
 		svc.Desired = new(config.Service)
 		*svc.Desired = updated
 		svc.RecalculateAction()
+		if svc.Action == resources.ServiceActionNoop &&
+			previousAction == resources.ServiceActionUpdate &&
+			previousPropagationReason != "" {
+			svc.Action = previousAction
+			svc.PropagationReason = previousPropagationReason
+		}
 	}
 }
 
@@ -1090,6 +1102,9 @@ func (e *Executor) runPreHooks(ctx context.Context, plan *ExecutionPlan, service
 		}
 
 		e.tracker.CompleteTask(hookName, fmt.Sprintf("exit 0 [%s]", result.Duration.Round(time.Second)))
+		if len(result.Logs) > 0 {
+			e.tracker.PrintHookLogs(hookName, result.Logs)
+		}
 	}
 
 	return nil
@@ -1154,6 +1169,9 @@ func (e *Executor) runPostHooks(ctx context.Context, plan *ExecutionPlan, servic
 		}
 
 		e.tracker.CompleteTask(hookName, fmt.Sprintf("exit 0 [%s]", result.Duration.Round(time.Second)))
+		if len(result.Logs) > 0 {
+			e.tracker.PrintHookLogs(hookName, result.Logs)
+		}
 	}
 }
 
