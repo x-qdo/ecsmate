@@ -185,12 +185,18 @@ func convertContainerDefinition(cd config.ContainerDefinition) types.ContainerDe
 	}
 
 	if cd.HealthCheck != nil {
-		containerDef.HealthCheck = &types.HealthCheck{
-			Command:     cd.HealthCheck.Command,
-			Interval:    aws.Int32(int32(cd.HealthCheck.Interval)),
-			Timeout:     aws.Int32(int32(cd.HealthCheck.Timeout)),
-			Retries:     aws.Int32(int32(cd.HealthCheck.Retries)),
-			StartPeriod: aws.Int32(int32(cd.HealthCheck.StartPeriod)),
+		containerDef.HealthCheck = &types.HealthCheck{Command: cd.HealthCheck.Command}
+		if cd.HealthCheck.Interval > 0 {
+			containerDef.HealthCheck.Interval = aws.Int32(int32(cd.HealthCheck.Interval))
+		}
+		if cd.HealthCheck.Timeout > 0 {
+			containerDef.HealthCheck.Timeout = aws.Int32(int32(cd.HealthCheck.Timeout))
+		}
+		if cd.HealthCheck.Retries > 0 {
+			containerDef.HealthCheck.Retries = aws.Int32(int32(cd.HealthCheck.Retries))
+		}
+		if cd.HealthCheck.StartPeriod > 0 {
+			containerDef.HealthCheck.StartPeriod = aws.Int32(int32(cd.HealthCheck.StartPeriod))
 		}
 	}
 

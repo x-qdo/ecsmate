@@ -714,7 +714,113 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 				if proto, err := ExtractString(iter.Value(), "protocol"); err == nil {
 					pm.Protocol = proto
 				}
+				if name, err := ExtractString(iter.Value(), "name"); err == nil {
+					pm.Name = name
+				}
+				if appProtocol, err := ExtractString(iter.Value(), "appProtocol"); err == nil {
+					pm.AppProtocol = appProtocol
+				}
 				cd.PortMappings = append(cd.PortMappings, pm)
+			}
+		}
+	}
+
+	// Parse mount points
+	mountPoints := v.LookupPath(cue.ParsePath("mountPoints"))
+	if mountPoints.Exists() {
+		iter, err := mountPoints.List()
+		if err == nil {
+			for iter.Next() {
+				mp := MountPoint{}
+				if sourceVolume, err := ExtractString(iter.Value(), "sourceVolume"); err == nil {
+					mp.SourceVolume = sourceVolume
+				}
+				if containerPath, err := ExtractString(iter.Value(), "containerPath"); err == nil {
+					mp.ContainerPath = containerPath
+				}
+				if readOnly, err := ExtractBool(iter.Value(), "readOnly"); err == nil {
+					mp.ReadOnly = readOnly
+				}
+				cd.MountPoints = append(cd.MountPoints, mp)
+			}
+		}
+	}
+
+	// Parse container health check
+	healthCheck := v.LookupPath(cue.ParsePath("healthCheck"))
+	if healthCheck.Exists() {
+		cd.HealthCheck = &HealthCheck{}
+		if command, err := ExtractStringSlice(healthCheck, "command"); err == nil {
+			cd.HealthCheck.Command = command
+		}
+		if interval, err := ExtractInt(healthCheck, "interval"); err == nil {
+			cd.HealthCheck.Interval = int(interval)
+		}
+		if timeout, err := ExtractInt(healthCheck, "timeout"); err == nil {
+			cd.HealthCheck.Timeout = int(timeout)
+		}
+		if retries, err := ExtractInt(healthCheck, "retries"); err == nil {
+			cd.HealthCheck.Retries = int(retries)
+		}
+		if startPeriod, err := ExtractInt(healthCheck, "startPeriod"); err == nil {
+			cd.HealthCheck.StartPeriod = int(startPeriod)
+		}
+	}
+
+	// Parse startup dependencies
+	dependencies := v.LookupPath(cue.ParsePath("dependsOn"))
+	if dependencies.Exists() {
+		iter, err := dependencies.List()
+		if err == nil {
+			for iter.Next() {
+				dependency := ContainerDependency{}
+				if containerName, err := ExtractString(iter.Value(), "containerName"); err == nil {
+					dependency.ContainerName = containerName
+				}
+				if condition, err := ExtractString(iter.Value(), "condition"); err == nil {
+					dependency.Condition = condition
+				}
+				cd.DependsOn = append(cd.DependsOn, dependency)
+			}
+		}
+	}
+
+	// Parse Linux parameters and capabilities
+	linuxParameters := v.LookupPath(cue.ParsePath("linuxParameters"))
+	if linuxParameters.Exists() {
+		cd.LinuxParameters = &LinuxParameters{}
+		if initProcessEnabled, err := ExtractBool(linuxParameters, "initProcessEnabled"); err == nil {
+			cd.LinuxParameters.InitProcessEnabled = initProcessEnabled
+		}
+		capabilities := linuxParameters.LookupPath(cue.ParsePath("capabilities"))
+		if capabilities.Exists() {
+			cd.LinuxParameters.Capabilities = &KernelCapabilities{}
+			if add, err := ExtractStringSlice(capabilities, "add"); err == nil {
+				cd.LinuxParameters.Capabilities.Add = add
+			}
+			if drop, err := ExtractStringSlice(capabilities, "drop"); err == nil {
+				cd.LinuxParameters.Capabilities.Drop = drop
+			}
+		}
+	}
+
+	// Parse ulimits
+	ulimits := v.LookupPath(cue.ParsePath("ulimits"))
+	if ulimits.Exists() {
+		iter, err := ulimits.List()
+		if err == nil {
+			for iter.Next() {
+				ulimit := Ulimit{}
+				if name, err := ExtractString(iter.Value(), "name"); err == nil {
+					ulimit.Name = name
+				}
+				if softLimit, err := ExtractInt(iter.Value(), "softLimit"); err == nil {
+					ulimit.SoftLimit = int(softLimit)
+				}
+				if hardLimit, err := ExtractInt(iter.Value(), "hardLimit"); err == nil {
+					ulimit.HardLimit = int(hardLimit)
+				}
+				cd.Ulimits = append(cd.Ulimits, ulimit)
 			}
 		}
 	}

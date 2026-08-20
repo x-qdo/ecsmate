@@ -602,6 +602,24 @@ func TestConvertContainerDefinition(t *testing.T) {
 	}
 }
 
+func TestConvertContainerDefinition_OmitsUnsetHealthCheckValues(t *testing.T) {
+	result := convertContainerDefinition(config.ContainerDefinition{
+		Name:      "app",
+		Image:     "app:latest",
+		Essential: true,
+		HealthCheck: &config.HealthCheck{
+			Command: []string{"CMD-SHELL", "check-health"},
+		},
+	})
+
+	if result.HealthCheck == nil {
+		t.Fatal("expected health check")
+	}
+	if result.HealthCheck.Interval != nil || result.HealthCheck.Timeout != nil || result.HealthCheck.Retries != nil || result.HealthCheck.StartPeriod != nil {
+		t.Errorf("expected omitted optional health check values, got %+v", result.HealthCheck)
+	}
+}
+
 func TestTaskDefResource_IsImageOnlyChangeRejectsPortMappingChange(t *testing.T) {
 	resource := &TaskDefResource{
 		Action: TaskDefActionUpdate,

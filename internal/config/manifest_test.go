@@ -261,6 +261,36 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 						containerPort: 8080
 						hostPort: 8080
 						protocol: "tcp"
+						name: "http"
+						appProtocol: "http"
+					}]
+					mountPoints: [{
+						sourceVolume: "data"
+						containerPath: "/data"
+						readOnly: true
+					}]
+					healthCheck: {
+						command: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+						interval: 30
+						timeout: 5
+						retries: 3
+						startPeriod: 10
+					}
+					dependsOn: [{
+						containerName: "init"
+						condition: "SUCCESS"
+					}]
+					linuxParameters: {
+						initProcessEnabled: true
+						capabilities: {
+							add: ["SYS_PTRACE"]
+							drop: ["NET_RAW"]
+						}
+					}
+					ulimits: [{
+						name: "nofile"
+						softLimit: 1024
+						hardLimit: 2048
 					}]
 					logConfiguration: {
 						logDriver: "awslogs"
@@ -329,6 +359,35 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 	}
 	if cd.PortMappings[0].ContainerPort != 8080 {
 		t.Errorf("expected containerPort 8080, got %d", cd.PortMappings[0].ContainerPort)
+	}
+	if cd.PortMappings[0].Name != "http" || cd.PortMappings[0].AppProtocol != "http" {
+		t.Errorf("expected named HTTP port mapping, got name=%q appProtocol=%q", cd.PortMappings[0].Name, cd.PortMappings[0].AppProtocol)
+	}
+
+	if len(cd.MountPoints) != 1 || cd.MountPoints[0] != (MountPoint{SourceVolume: "data", ContainerPath: "/data", ReadOnly: true}) {
+		t.Errorf("unexpected mount points: %+v", cd.MountPoints)
+	}
+
+	if cd.HealthCheck == nil {
+		t.Fatal("expected health check")
+	}
+	if len(cd.HealthCheck.Command) != 2 || cd.HealthCheck.Interval != 30 || cd.HealthCheck.Timeout != 5 || cd.HealthCheck.Retries != 3 || cd.HealthCheck.StartPeriod != 10 {
+		t.Errorf("unexpected health check: %+v", cd.HealthCheck)
+	}
+
+	if len(cd.DependsOn) != 1 || cd.DependsOn[0] != (ContainerDependency{ContainerName: "init", Condition: "SUCCESS"}) {
+		t.Errorf("unexpected container dependencies: %+v", cd.DependsOn)
+	}
+
+	if cd.LinuxParameters == nil || !cd.LinuxParameters.InitProcessEnabled || cd.LinuxParameters.Capabilities == nil {
+		t.Fatalf("unexpected Linux parameters: %+v", cd.LinuxParameters)
+	}
+	if len(cd.LinuxParameters.Capabilities.Add) != 1 || cd.LinuxParameters.Capabilities.Add[0] != "SYS_PTRACE" || len(cd.LinuxParameters.Capabilities.Drop) != 1 || cd.LinuxParameters.Capabilities.Drop[0] != "NET_RAW" {
+		t.Errorf("unexpected Linux capabilities: %+v", cd.LinuxParameters.Capabilities)
+	}
+
+	if len(cd.Ulimits) != 1 || cd.Ulimits[0] != (Ulimit{Name: "nofile", SoftLimit: 1024, HardLimit: 2048}) {
+		t.Errorf("unexpected ulimits: %+v", cd.Ulimits)
 	}
 
 	if cd.LogConfiguration == nil {
