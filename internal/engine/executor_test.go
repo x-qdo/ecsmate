@@ -211,8 +211,8 @@ func TestExecutor_RefreshTaskDefinitionRefs_RecalculatesIngressService(t *testin
 
 	executor := &Executor{}
 	executor.resolveIngressTargetGroups(plan, map[int]string{0: targetGroupArn})
-	if service.Action != resources.ServiceActionNoop {
-		t.Fatalf("expected ingress resolution to recalculate the service as NOOP before task definition refresh, got %s", service.Action)
+	if service.Action != resources.ServiceActionUpdate {
+		t.Fatalf("expected ingress resolution to preserve the propagated UPDATE, got %s", service.Action)
 	}
 
 	executor.refreshTaskDefinitionRefs(plan)
@@ -222,6 +222,70 @@ func TestExecutor_RefreshTaskDefinitionRefs_RecalculatesIngressService(t *testin
 	}
 	if service.Action != resources.ServiceActionUpdate {
 		t.Fatalf("expected refreshed task definition to recalculate the service as UPDATE, got %s", service.Action)
+	}
+}
+
+func TestExecutor_PreservesHookTaskDefinitionUpdateForIngressService(t *testing.T) {
+	const (
+		appTaskDef     = "arn:aws:ecs:eu-west-1:123456789012:task-definition/app:2"
+		targetGroupArn = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:targetgroup/app/123"
+	)
+
+	desired := config.Service{
+		Name:           "app",
+		Cluster:        "cluster",
+		TaskDefinition: "app",
+		DesiredCount:   1,
+		Hooks: &config.Hooks{
+			PreHook: &config.Hook{TaskDefinition: "migration"},
+		},
+	}
+	service := &resources.ServiceResource{
+		Name:              "app",
+		Desired:           &desired,
+		TaskDefinitionArn: appTaskDef,
+		Action:            resources.ServiceActionUpdate,
+		PropagationReason: "task definition updated",
+		Current: &types.Service{
+			TaskDefinition: aws.String(appTaskDef),
+			DesiredCount:   1,
+			LoadBalancers: []types.LoadBalancer{{
+				TargetGroupArn: aws.String(targetGroupArn),
+				ContainerName:  aws.String("app"),
+				ContainerPort:  aws.Int32(8080),
+			}},
+		},
+	}
+
+	graph := NewDependencyGraph()
+	graph.AddNode("app", service)
+	plan := &ExecutionPlan{
+		Manifest: &config.Manifest{
+			Services: map[string]config.Service{"app": desired},
+			Ingress: &config.Ingress{Rules: []config.IngressRule{{
+				Service: &config.IngressServiceBackend{
+					Name:          "app",
+					ContainerName: "app",
+					ContainerPort: 8080,
+				},
+			}}},
+		},
+		TaskDefs: []*resources.TaskDefResource{
+			{Name: "app", ResolvedArn: appTaskDef},
+			{Name: "migration", ResolvedArn: "arn:aws:ecs:eu-west-1:123456789012:task-definition/migration:3"},
+		},
+		Graph: graph,
+	}
+
+	executor := &Executor{}
+	executor.resolveIngressTargetGroups(plan, map[int]string{0: targetGroupArn})
+	executor.refreshTaskDefinitionRefs(plan)
+
+	if service.Action != resources.ServiceActionUpdate {
+		t.Fatalf("expected hook task definition propagation to remain UPDATE, got %s", service.Action)
+	}
+	if service.PropagationReason != "task definition updated" {
+		t.Fatalf("expected hook propagation reason to be retained, got %q", service.PropagationReason)
 	}
 }
 

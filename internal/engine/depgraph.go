@@ -295,9 +295,24 @@ func BuildResourceGraph(state *resources.DesiredState) (*DependencyGraph, error)
 
 		serviceID := "Service/" + name
 
-		// Service depends on its task definition
+		// A service deployment runs its hooks as well as its primary task
+		// definition, so changes to any of those task definitions must make the
+		// service executable in the plan.
+		taskDefDependencies := make(map[string]struct{})
 		if svc.Desired.TaskDefinition != "" {
-			tdID := "TaskDef/" + svc.Desired.TaskDefinition
+			taskDefDependencies[svc.Desired.TaskDefinition] = struct{}{}
+		}
+		if svc.Desired.Hooks != nil {
+			if hook := svc.Desired.Hooks.PreHook; hook != nil && hook.TaskDefinition != "" {
+				taskDefDependencies[hook.TaskDefinition] = struct{}{}
+			}
+			if hook := svc.Desired.Hooks.PostHook; hook != nil && hook.TaskDefinition != "" {
+				taskDefDependencies[hook.TaskDefinition] = struct{}{}
+			}
+		}
+
+		for taskDefName := range taskDefDependencies {
+			tdID := "TaskDef/" + taskDefName
 			if _, ok := graph.GetNode(tdID); ok {
 				if err := graph.AddEdge(tdID, serviceID); err != nil {
 					log.Debug("failed to add TaskDef edge", "error", err)
