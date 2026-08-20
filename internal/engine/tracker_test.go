@@ -673,3 +673,21 @@ func TestLineCountWithVaryingEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestTracker_PrintHookLogs(t *testing.T) {
+	buf := &bytes.Buffer{}
+	tracker := NewTracker(buf, true)
+
+	tracker.PrintHookLogs("api/pre-hook", []string{"Applying migration 42", "Migration complete"})
+
+	output := buf.String()
+	for _, expected := range []string{
+		"api/pre-hook task logs:",
+		"Applying migration 42",
+		"Migration complete",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}

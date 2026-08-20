@@ -698,6 +698,15 @@ func (t *Tracker) renderServiceProgress(state *ServiceProgressState) int {
 
 // PrintLogs prints log lines (used for task failure logs)
 func (t *Tracker) PrintLogs(serviceName string, logs []string) {
+	t.printLogs(serviceName, logs, t.errorColor)
+}
+
+// PrintHookLogs prints logs from a successfully completed deployment hook.
+func (t *Tracker) PrintHookLogs(hookName string, logs []string) {
+	t.printLogs(hookName, logs, t.infoColor)
+}
+
+func (t *Tracker) printLogs(taskName string, logs []string, headerColor *color.Color) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -705,7 +714,7 @@ func (t *Tracker) PrintLogs(serviceName string, logs []string) {
 		return
 	}
 
-	t.errorColor.Fprintf(t.out, "  %s task logs:\n", serviceName)
+	headerColor.Fprintf(t.out, "  %s task logs:\n", taskName)
 	for _, line := range logs {
 		t.dimColor.Fprintf(t.out, "    %s\n", line)
 	}
