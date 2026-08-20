@@ -287,6 +287,7 @@ func (e *Executor) refreshTaskDefinitionRefs(plan *ExecutionPlan) {
 			if arn, ok := taskDefArns[taskDefName]; ok && arn != "" {
 				log.Debug("refreshing service task definition", "service", node.Name, "taskDef", taskDefName, "arn", arn)
 				svc.TaskDefinitionArn = arn
+				svc.RecalculateAction()
 			}
 		}
 	}
