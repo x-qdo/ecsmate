@@ -15,7 +15,11 @@ import (
 )
 
 var (
-	outputFormat string
+	outputFormat         string
+	templateResolveSSM   bool
+	newTemplateSSMClient = func(ctx context.Context, region string) (config.SSMResolver, error) {
+		return aws.NewSSMClient(ctx, region)
+	}
 )
 
 var templateCmd = &cobra.Command{
@@ -23,8 +27,9 @@ var templateCmd = &cobra.Command{
 	Short: "Render manifest without comparing to remote state",
 	Long: `Render the desired state from manifests without connecting to AWS ECS.
 
-Outputs the fully resolved manifest including any SSM parameter values
-(unless --no-ssm is specified) in YAML or JSON format.
+Outputs the rendered manifest in YAML or JSON format. SSM parameter
+references are preserved by default to avoid printing secrets; use
+--resolve-ssm to resolve them explicitly.
 
 This is useful for:
 - Debugging manifest configuration
@@ -38,13 +43,17 @@ Examples:
   # Render as JSON
   ecsmate template -m ./deploy -o json
 
-  # Render with specific values, without SSM resolution
-  ecsmate template -m ./deploy -f values/prod.cue --no-ssm`,
+  # Render with specific values, preserving SSM references
+  ecsmate template -m ./deploy -f values/prod.cue
+
+  # Explicitly resolve SSM references before rendering
+  ecsmate template -m ./deploy --resolve-ssm`,
 	RunE: runTemplate,
 }
 
 func init() {
 	templateCmd.Flags().StringVarP(&outputFormat, "output", "o", "yaml", "Output format: yaml or json")
+	templateCmd.Flags().BoolVar(&templateResolveSSM, "resolve-ssm", false, "Resolve SSM parameter references before rendering (may print secrets)")
 }
 
 func runTemplate(cmd *cobra.Command, args []string) error {
@@ -53,15 +62,12 @@ func runTemplate(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
-	// Initialize SSM client for parameter resolution
-	var ssmClient config.SSMResolver
-	if !opts.NoSSM {
-		client, err := aws.NewSSMClient(ctx, opts.Region)
-		if err != nil {
-			log.Warn("failed to initialize SSM client, SSM references will not be resolved", "error", err)
-		} else {
-			ssmClient = client
-		}
+	// Do not resolve SSM references by default: template output is commonly
+	// captured in logs and artifacts, so resolving SecureString values here
+	// can disclose secrets. Users who explicitly need resolved output can opt in.
+	ssmClient, err := templateSSMResolver(ctx, &opts)
+	if err != nil {
+		log.Warn("failed to initialize SSM client, SSM references will not be resolved", "error", err)
 	}
 
 	manifest, err := loadManifest(ctx, &opts, ssmClient)
@@ -88,4 +94,12 @@ func runTemplate(cmd *cobra.Command, args []string) error {
 
 	fmt.Println(string(output))
 	return nil
+}
+
+func templateSSMResolver(ctx context.Context, opts *GlobalOptions) (config.SSMResolver, error) {
+	if !templateResolveSSM || opts.NoSSM {
+		return nil, nil
+	}
+
+	return newTemplateSSMClient(ctx, opts.Region)
 }
