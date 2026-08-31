@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
+	"github.com/x-qdo/ecsmate/internal/config"
 )
 
 // Box-drawing characters for visual grouping
@@ -559,7 +560,7 @@ func (r *Renderer) renderBoxedNewMap(m map[string]interface{}, indent string) {
 }
 
 func (r *Renderer) formatAsLines(v interface{}) []string {
-	data, err := json.MarshalIndent(v, "", "  ")
+	data, err := json.MarshalIndent(redactResolvedSSMValues(v), "", "  ")
 	if err != nil {
 		return nil
 	}
@@ -567,6 +568,8 @@ func (r *Renderer) formatAsLines(v interface{}) []string {
 }
 
 func toMap(v interface{}) map[string]interface{} {
+	v = redactResolvedSSMValues(v)
+
 	// If already a map, return it
 	if m, ok := v.(map[string]interface{}); ok {
 		return m
@@ -584,6 +587,38 @@ func toMap(v interface{}) map[string]interface{} {
 	}
 
 	return m
+}
+
+func redactResolvedSSMValues(v interface{}) interface{} {
+	switch val := v.(type) {
+	case string:
+		return config.RedactResolvedSSMValue(val)
+	case map[string]interface{}:
+		redacted := make(map[string]interface{}, len(val))
+		for k, item := range val {
+			redacted[k] = redactResolvedSSMValues(item)
+		}
+		return redacted
+	case []interface{}:
+		redacted := make([]interface{}, len(val))
+		for i, item := range val {
+			redacted[i] = redactResolvedSSMValues(item)
+		}
+		return redacted
+	case nil, bool, float64:
+		return val
+	default:
+		data, err := json.Marshal(val)
+		if err != nil {
+			return val
+		}
+
+		var decoded interface{}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			return val
+		}
+		return redactResolvedSSMValues(decoded)
+	}
 }
 
 func indexByName(arr []interface{}) map[string]interface{} {
