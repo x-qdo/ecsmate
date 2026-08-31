@@ -495,6 +495,46 @@ func TestScheduledTaskResource_NoOverrides(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskResource_RoleOverridesAreNotSerialized(t *testing.T) {
+	resource := &ScheduledTaskResource{
+		Name: "role-override-task",
+		Desired: &config.ScheduledTask{
+			TaskDefinition: "cron",
+			Cluster:        "test-cluster",
+			TaskCount:      1,
+			Overrides: &config.TaskOverrides{
+				TaskRoleArn:      "arn:aws:iam::123456789:role/AdminTaskRole",
+				ExecutionRoleArn: "arn:aws:iam::123456789:role/AdminExecutionRole",
+			},
+		},
+		TaskDefinitionArn: "arn:aws:ecs:us-east-1:123456789:task-definition/cron:1",
+		RoleArn:           "arn:aws:iam::123456789:role/scheduler-role",
+	}
+
+	input, err := resource.ToCreateInput("default")
+	if err != nil {
+		t.Fatalf("failed to create input: %v", err)
+	}
+
+	if input.Target.Input != nil {
+		t.Errorf("expected no target input when only role overrides are configured, got: %s", aws.ToString(input.Target.Input))
+	}
+
+	resource.Desired.Overrides.CPU = "512"
+	input, err = resource.ToCreateInput("default")
+	if err != nil {
+		t.Fatalf("failed to create input with CPU override: %v", err)
+	}
+
+	inputJSON := aws.ToString(input.Target.Input)
+	if strings.Contains(inputJSON, "taskRoleArn") || strings.Contains(inputJSON, "executionRoleArn") {
+		t.Errorf("expected role override ARNs to be omitted from target input, got: %s", inputJSON)
+	}
+	if !strings.Contains(inputJSON, `"cpu":"512"`) {
+		t.Errorf("expected safe CPU override to remain serialized, got: %s", inputJSON)
+	}
+}
+
 func TestBuildOverridesInput_ListConcat(t *testing.T) {
 	resource := &ScheduledTaskResource{
 		Desired: &config.ScheduledTask{
