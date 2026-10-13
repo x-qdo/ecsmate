@@ -10,13 +10,14 @@ import (
 )
 
 type Manifest struct {
-	Name            string
-	Tags            map[string]string
-	Secrets         *SecretsConfig
-	TaskDefinitions map[string]TaskDefinition
-	Services        map[string]Service
-	ScheduledTasks  map[string]ScheduledTask
-	Ingress         *Ingress
+	Name                  string
+	Tags                  map[string]string
+	Secrets               *SecretsConfig
+	TaskDefinitions       map[string]TaskDefinition
+	Services              map[string]Service
+	ScheduledTasks        map[string]ScheduledTask
+	ScheduleCleanupPrefix string
+	Ingress               *Ingress
 }
 
 type SecretsConfig struct {
@@ -443,6 +444,16 @@ func ParseManifest(value cue.Value) (*Manifest, error) {
 
 	if name, err := ExtractString(value, "name"); err == nil {
 		manifest.Name = name
+	}
+	if prefix := value.LookupPath(cue.ParsePath("scheduleCleanupPrefix")); prefix.Exists() {
+		var err error
+		manifest.ScheduleCleanupPrefix, err = prefix.String()
+		if err != nil {
+			return nil, fmt.Errorf("scheduleCleanupPrefix must be a concrete string: %w", err)
+		}
+		if manifest.ScheduleCleanupPrefix == "" {
+			return nil, fmt.Errorf("scheduleCleanupPrefix must not be empty; omit it to disable cleanup")
+		}
 	}
 
 	tags := value.LookupPath(cue.ParsePath("tags"))

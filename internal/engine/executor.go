@@ -9,8 +9,6 @@ import (
 	"sync"
 	"time"
 
-	awssdk "github.com/aws/aws-sdk-go-v2/aws"
-
 	"github.com/x-qdo/ecsmate/internal/aws"
 	"github.com/x-qdo/ecsmate/internal/config"
 	"github.com/x-qdo/ecsmate/internal/log"
@@ -929,53 +927,31 @@ func (e *Executor) applyScheduledTasks(ctx context.Context, plan *ExecutionPlan)
 
 	e.tracker.PrintSection("\nScheduled Tasks")
 
-	manifestTags := make(map[string]string)
-	if plan.Manifest != nil {
-		manifestTags = plan.Manifest.Tags
-	}
-
-	for _, task := range plan.ScheduledTasks {
-		e.tracker.AddTask(task.Name, "scheduled-task")
-
-		if task.Action == resources.ScheduledTaskActionNoop {
-			e.tracker.SkipTask(task.Name, "unchanged")
-			continue
-		}
-
-		e.tracker.StartTask(task.Name)
-
-		if err := e.scheduledManager.Apply(ctx, task); err != nil {
-			e.tracker.FailTask(task.Name, err.Error())
-			return fmt.Errorf("scheduled task %s: %w", task.Name, err)
-		}
-
-		if task.Action == resources.ScheduledTaskActionCreate || task.Action == resources.ScheduledTaskActionUpdate {
-			if err := e.tagSchedule(ctx, task, manifestTags); err != nil {
-				log.Debug("failed to tag schedule", "name", task.Name, "error", err)
+	// Only prune after every desired schedule has been applied successfully.
+	for _, deleting := range []bool{false, true} {
+		for _, task := range plan.ScheduledTasks {
+			if (task.Action == resources.ScheduledTaskActionDelete) != deleting {
+				continue
 			}
-		}
+			e.tracker.AddTask(task.Name, "scheduled-task")
 
-		e.tracker.CompleteTask(task.Name, task.ScheduleExpression())
+			if task.Action == resources.ScheduledTaskActionNoop {
+				e.tracker.SkipTask(task.Name, "unchanged")
+				continue
+			}
+
+			e.tracker.StartTask(task.Name)
+
+			if err := e.scheduledManager.Apply(ctx, task); err != nil {
+				e.tracker.FailTask(task.Name, err.Error())
+				return fmt.Errorf("scheduled task %s: %w", task.Name, err)
+			}
+
+			e.tracker.CompleteTask(task.Name, task.ScheduleExpression())
+		}
 	}
 
 	return nil
-}
-
-func (e *Executor) tagSchedule(ctx context.Context, task *resources.ScheduledTaskResource, manifestTags map[string]string) error {
-	if e.schedulerClient == nil {
-		return nil
-	}
-
-	arn := task.Arn
-	if arn == "" && task.Current != nil {
-		arn = awssdk.ToString(task.Current.Arn)
-	}
-	if arn == "" {
-		return nil
-	}
-
-	tags := resources.BuildSchedulerTags(manifestTags)
-	return e.schedulerClient.TagResource(ctx, arn, tags)
 }
 
 func (e *Executor) Tracker() *Tracker {

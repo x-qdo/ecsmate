@@ -9,6 +9,7 @@ import (
 
 	"github.com/x-qdo/ecsmate/internal/config"
 	"github.com/x-qdo/ecsmate/internal/log"
+	"github.com/x-qdo/ecsmate/internal/resources"
 )
 
 var validateCmd = &cobra.Command{
@@ -112,6 +113,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 // validateManifestContent performs semantic validation on the parsed manifest
 func validateManifestContent(manifest *config.Manifest) []string {
 	var errors []string
+	if err := resources.ValidateScheduleCleanup(manifest, false); err != nil {
+		errors = append(errors, err.Error())
+	}
 
 	// Validate task definitions
 	for name, td := range manifest.TaskDefinitions {

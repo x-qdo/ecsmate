@@ -361,6 +361,44 @@ scheduledTasks: {
 }
 ```
 
+#### Removing obsolete schedules
+
+Schedule cleanup is opt-in. Set `scheduleCleanupPrefix` on the manifest to reserve
+an exclusive schedule-name prefix within its Scheduler group (`manifest.name`):
+
+```cue
+manifest: schema.#Manifest & {
+  name: "myapp"
+  scheduleCleanupPrefix: "myapp-stage_"
+  // Scheduled task keys such as "stage_nightly" resolve to "myapp-stage_nightly".
+  // ...
+}
+```
+
+The prefix must start with `<manifest.name>-`, use only AWS schedule-name
+characters (letters, digits, `.`, `_`, `-`; at most 64 characters), and contain
+every resolved scheduled-task name. Use separate prefixes when environments
+share a group. Omitting the field disables orphan detection.
+
+By default, `diff` and `apply` only warn about schedules under that prefix that
+are absent from the manifest. These warnings do not count as changes or affect
+the diff exit code. Pass `--prune-schedules` to **both** commands to include those
+schedules as ordinary `DELETE` entries and delete them during apply, after
+service deployment and successful creation/update of all desired schedules.
+If a schedule create or update fails, no obsolete schedules are deleted.
+
+The prefix is the ownership contract: manually created schedules under it are
+also eligible for deletion. AWS tags individual schedule groups, not schedules;
+cleanup does not use tags. Serialize deployments that share a prefix, including
+manual runs; ECSMate does not lock Scheduler resources.
+
+A failed cleanup read warns in report-only mode and fails planning in pruning
+mode. A missing group is treated as empty; deleting an already absent schedule
+succeeds. If no scheduled tasks render but live candidates exist, report-only
+warns and pruning fails without deleting anything. Review the configuration;
+intentional removal of the final jobs requires manual cleanup. Existing schedule
+names and groups are not migrated automatically.
+
 ### Ingress (ALB listener rules)
 Ingress rules generate target groups and listener rules.
 ```cue
