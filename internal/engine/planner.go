@@ -252,21 +252,21 @@ func (p *Planner) planServices(state *resources.DesiredState, plan *Plan) {
 		switch svc.Action {
 		case resources.ServiceActionCreate:
 			entry.Type = diff.DiffTypeCreate
-			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
+			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups)
 			entry.Hooks = buildHooksList(svc.Desired)
 			plan.Summary.Creates++
 
 		case resources.ServiceActionUpdate:
 			entry.Type = diff.DiffTypeUpdate
 			entry.Current = buildServiceCurrentView(svc)
-			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
+			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups)
 			entry.Hooks = buildHooksList(svc.Desired)
 			plan.Summary.Updates++
 
 		case resources.ServiceActionRecreate:
 			entry.Type = diff.DiffTypeRecreate
 			entry.Current = buildServiceCurrentView(svc)
-			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups, manifestName(state))
+			entry.Desired = buildServiceView(svc, ingress, state.TaskDefs, state.TargetGroups)
 			entry.RecreateReasons = svc.RecreateReasons
 			entry.Hooks = buildHooksList(svc.Desired)
 			plan.Summary.Recreates++
@@ -793,7 +793,7 @@ const (
 	pendingTaskDefRevision = "(new revision after apply)"
 )
 
-func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, taskDefs map[string]*resources.TaskDefResource, targetGroups map[string]*resources.TargetGroupResource, manifestName string) ServiceView {
+func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, taskDefs map[string]*resources.TaskDefResource, targetGroups map[string]*resources.TargetGroupResource) ServiceView {
 	view := ServiceView{}
 
 	if svc.Desired != nil {
@@ -835,7 +835,7 @@ func buildServiceView(svc *resources.ServiceResource, ingress *config.Ingress, t
 			})
 		}
 
-		addIngressLoadBalancerPlaceholders(&view, svc.Desired, ingress, svc.Name, targetGroups, manifestName)
+		addIngressLoadBalancerPlaceholders(&view, svc.Desired, ingress, svc.Name, targetGroups)
 		addTaskDefinitionPlaceholder(&view, svc.Desired, taskDefs)
 
 		strategy := svc.Desired.Deployment.Strategy
@@ -916,12 +916,12 @@ func addTaskDefinitionPlaceholder(view *ServiceView, svc *config.Service, taskDe
 	view.TaskDefinition = base + ":" + pendingTaskDefRevision
 }
 
-func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, ingress *config.Ingress, serviceName string, targetGroups map[string]*resources.TargetGroupResource, manifestName string) {
+func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, ingress *config.Ingress, serviceName string, targetGroups map[string]*resources.TargetGroupResource) {
 	if ingress == nil || svc == nil {
 		return
 	}
 
-	for _, rule := range ingress.Rules {
+	for ruleIndex, rule := range ingress.Rules {
 		if rule.Service == nil || rule.Service.Name != serviceName {
 			continue
 		}
@@ -937,7 +937,7 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 			lb := &view.LoadBalancers[i]
 			if lb.ContainerName == containerName && lb.ContainerPort == containerPort {
 				if lb.TargetGroupArn == "" {
-					lb.TargetGroupArn = resolveTargetGroupArnForView(targetGroups, manifestName, rule.Priority)
+					lb.TargetGroupArn = resolveTargetGroupArnForView(targetGroups, ruleIndex)
 				}
 				updated = true
 				break
@@ -946,7 +946,7 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 
 		if !updated {
 			view.LoadBalancers = append(view.LoadBalancers, LoadBalancerView{
-				TargetGroupArn: resolveTargetGroupArnForView(targetGroups, manifestName, rule.Priority),
+				TargetGroupArn: resolveTargetGroupArnForView(targetGroups, ruleIndex),
 				ContainerName:  containerName,
 				ContainerPort:  containerPort,
 			})
@@ -957,39 +957,12 @@ func addIngressLoadBalancerPlaceholders(view *ServiceView, svc *config.Service, 
 // resolveTargetGroupArnForView returns the ARN for diff view display.
 // Returns placeholder only when TG is being created or recreated (new ARN will be assigned).
 // For existing TGs (NOOP/UPDATE), returns the existing ARN.
-func resolveTargetGroupArnForView(targetGroups map[string]*resources.TargetGroupResource, manifestName string, priority int) string {
-	if targetGroups == nil || manifestName == "" || priority == 0 {
+func resolveTargetGroupArnForView(targetGroups map[string]*resources.TargetGroupResource, ruleIndex int) string {
+	tg := targetGroups[fmt.Sprintf("rule-%d", ruleIndex)]
+	if tg == nil || tg.Action == resources.TargetGroupActionCreate || tg.Action == resources.TargetGroupActionRecreate || tg.Arn == "" {
 		return pendingTargetGroupArn
 	}
-
-	targetGroupName := fmt.Sprintf("%s-r%d", manifestName, priority)
-	for _, tg := range targetGroups {
-		if tg == nil || tg.Name != targetGroupName {
-			continue
-		}
-
-		switch tg.Action {
-		case resources.TargetGroupActionCreate:
-			return pendingTargetGroupArn
-		case resources.TargetGroupActionRecreate:
-			return pendingTargetGroupArn
-		default:
-			// NOOP, UPDATE, DELETE - use existing ARN
-			if tg.Arn != "" {
-				return tg.Arn
-			}
-			return pendingTargetGroupArn
-		}
-	}
-
-	return pendingTargetGroupArn
-}
-
-func manifestName(state *resources.DesiredState) string {
-	if state == nil || state.Manifest == nil {
-		return ""
-	}
-	return state.Manifest.Name
+	return tg.Arn
 }
 
 func buildServiceCurrentView(svc *resources.ServiceResource) ServiceView {

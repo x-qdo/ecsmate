@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +20,7 @@ type Executor struct {
 	ecsClient           *aws.ECSClient
 	schedulerClient     *aws.SchedulerClient
 	cloudwatchClient    *aws.CloudWatchLogsClient
-	elbv2Client         *aws.ELBV2Client
+	elbv2Client         aws.IngressAPI
 	taskDefManager      *resources.TaskDefManager
 	serviceManager      *resources.ServiceManager
 	scheduledManager    *resources.ScheduledTaskManager
@@ -48,7 +47,7 @@ type ExecutorConfig struct {
 	ECSClient              *aws.ECSClient
 	SchedulerClient        *aws.SchedulerClient
 	CloudWatchClient       *aws.CloudWatchLogsClient
-	ELBV2Client            *aws.ELBV2Client
+	ELBV2Client            aws.IngressAPI
 	ServiceDiscoveryClient *aws.ServiceDiscoveryClient
 	TaskDefManager         *resources.TaskDefManager
 	ServiceManager         *resources.ServiceManager
@@ -107,6 +106,9 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 }
 
 func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan, cluster string) error {
+	if err := resources.RevalidateIngress(ctx, e.elbv2Client, plan.Manifest, plan.TargetGroups, plan.ListenerRules); err != nil {
+		return err
+	}
 	e.tracker.PrintHeader(cluster)
 
 	if err := e.applySSMParams(ctx); err != nil {
@@ -369,20 +371,17 @@ func (e *Executor) applyTargetGroups(ctx context.Context, plan *ExecutionPlan) (
 		return targetGroupArns, nil
 	}
 
-	ingress := plan.Manifest.Ingress
-	targetGroupSpecs := resources.ExtractTargetGroups(plan.Manifest, plan.Manifest.Name)
-
-	if len(targetGroupSpecs) == 0 {
+	if len(plan.TargetGroups) == 0 {
 		return targetGroupArns, nil
 	}
 
 	e.tracker.PrintSection("\nTarget Groups")
 
-	for key, spec := range targetGroupSpecs {
-		resource, err := e.targetGroupManager.BuildResource(ctx, key, spec, ingress.VpcID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build target group %s: %w", spec.Name, err)
+	for _, resource := range plan.TargetGroups {
+		if resource.Desired == nil {
+			continue // Orphans are removed after listener rules and services.
 		}
+		spec := resource.Desired
 
 		e.tracker.AddTask(spec.Name, "target-group")
 
@@ -400,11 +399,7 @@ func (e *Executor) applyTargetGroups(ctx context.Context, plan *ExecutionPlan) (
 		}
 
 		// Store the ARN for later use in listener rules
-		idx, err := strconv.Atoi(strings.TrimPrefix(key, "rule-"))
-		if err != nil {
-			return nil, fmt.Errorf("invalid target group key %q: %w", key, err)
-		}
-		targetGroupArns[idx] = resource.Arn
+		targetGroupArns[spec.RuleIndex] = resource.Arn
 	}
 
 	return targetGroupArns, nil
@@ -415,39 +410,23 @@ func (e *Executor) applyListenerRules(ctx context.Context, plan *ExecutionPlan, 
 		return nil
 	}
 
-	ingress := plan.Manifest.Ingress
-	hasOrphans := false
-	for _, resource := range plan.ListenerRules {
-		if resource.Desired == nil && resource.Action == resources.ListenerRuleActionDelete {
-			hasOrphans = true
-			break
-		}
-	}
-	if len(ingress.Rules) == 0 && !hasOrphans {
+	if len(plan.ListenerRules) == 0 {
 		return nil
 	}
 
 	e.tracker.PrintSection("\nListener Rules")
 
-	var ruleResources []*resources.ListenerRuleResource
-	if len(ingress.Rules) > 0 {
-		var err error
-		ruleResources, err = e.listenerRuleManager.BuildResources(ctx, ingress.ListenerArn, ingress.Rules, targetGroupArns, plan.Manifest.Name, plan.Manifest.Tags, nil)
-		if err != nil {
-			return fmt.Errorf("failed to build listener rules: %w", err)
-		}
-	}
-
-	// BuildResources above intentionally handles only desired rules. Preserve
-	// the ownership-verified orphan resources discovered while planning so an
-	// apply executes the deletes shown by diff.
 	for _, resource := range plan.ListenerRules {
-		if resource.Desired == nil && resource.Action == resources.ListenerRuleActionDelete {
-			ruleResources = append(ruleResources, resource)
+		if resource.Desired != nil && resource.Desired.Service != nil {
+			resource.TargetGroupArn = targetGroupArns[resource.RuleIndex]
+			if resource.TargetGroupArn == "" {
+				return fmt.Errorf("missing target group for rule %d", resource.Priority)
+			}
+			if resource.Action == resources.ListenerRuleActionNoop && resource.HasConfigChanges() {
+				resource.Action = resources.ListenerRuleActionUpdate
+			}
 		}
-	}
 
-	for _, resource := range ruleResources {
 		name := fmt.Sprintf("rule-%d", resource.Priority)
 		e.tracker.AddTask(name, "listener-rule")
 

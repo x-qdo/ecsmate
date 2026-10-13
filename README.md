@@ -362,8 +362,10 @@ scheduledTasks: {
 ```
 
 ### Ingress (ALB listener rules)
-Ingress rules generate target groups and listener rules.
+Ingress rules generate target groups and listener rules. Manifest tags must identify the instance across environments; ECSMate adds these tags and `ManagedBy=ecsmate` to newly created ingress resources.
 ```cue
+tags: { Environment: "stage", Application: "app" }
+
 ingress: {
   listenerArn: "arn:aws:elasticloadbalancing:..."
   vpcId: "vpc-123"
@@ -379,6 +381,8 @@ ingress: {
   }]
 }
 ```
+
+ECSMate rejects occupied priorities and conflicting instance hostnames instead of shifting priorities automatically. See [ingress safety](docs/ingress-safety.md) for ownership checks, compatibility, and upgrade requirements.
 
 ## Values and overrides
 Manifests commonly split defaults and environment-specific values under
