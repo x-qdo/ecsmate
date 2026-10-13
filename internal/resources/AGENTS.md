@@ -64,6 +64,7 @@ Ingress additionally requires every manifest tag to match; target groups must al
 - TargetGroups: naming pattern `{manifestName}-r{priority}` + tag check
 - ServiceDiscovery: by namespace, tag check
 - ListenerRules: by host/path first; priority fallback only for manageable, verified-owned rules. No automatic priority allocation. Protected rules and their referenced target groups are not cleaned up.
+- ScheduledTasks: explicit `scheduleCleanupPrefix` within the manifest's Scheduler group; no per-schedule tags. Report-only unless `--prune-schedules` is passed. Pruning fails on cleanup read errors or an empty rendered schedule set with live candidates.
 
 ## RECREATE TRIGGERS
 

@@ -95,6 +95,29 @@ func TestParseContainerDefinition_ValidatesRestartPolicy(t *testing.T) {
 	}
 }
 
+func TestParseManifest_ScheduleCleanupPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		value, want string
+		wantErr     bool
+	}{
+		{value: `{name: "app"}`},
+		{value: `{name: "app", scheduleCleanupPrefix: "app-stage_"}`, want: "app-stage_"},
+		{value: `{name: "app", scheduleCleanupPrefix: ""}`, wantErr: true},
+		{value: `{name: "app", scheduleCleanupPrefix: string}`, wantErr: true},
+		{value: `{name: "app", scheduleCleanupPrefix: 123}`, wantErr: true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			m, err := ParseManifest(cuecontext.New().CompileString(tc.value))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("expected error=%v, got %v", tc.wantErr, err)
+			}
+			if err == nil && m.ScheduleCleanupPrefix != tc.want {
+				t.Fatalf("prefix = %q, want %q", m.ScheduleCleanupPrefix, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseManifest_Basic(t *testing.T) {
 	ctx := cuecontext.New()
 	cueStr := `{
