@@ -33,7 +33,7 @@ type DesiredState struct {
 
 type ResourceBuilder struct {
 	ecsClient          *awsclient.ECSClient
-	schedulerClient    *awsclient.SchedulerClient
+	pruneSchedules     bool
 	autoScalingClient  *awsclient.AutoScalingClient
 	elbv2Client        *awsclient.ELBV2Client
 	taskDefManager     *TaskDefManager
@@ -53,6 +53,7 @@ type ResourceBuilderConfig struct {
 	ServiceDiscoveryClient *awsclient.ServiceDiscoveryClient
 	CloudWatchClient       *awsclient.CloudWatchLogsClient
 	SchedulerGroupName     string
+	PruneSchedules         bool
 }
 
 func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
@@ -79,15 +80,19 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 	if cfg.CloudWatchClient != nil {
 		logGroupManager = NewLogGroupManager(cfg.CloudWatchClient)
 	}
+	var scheduledManager *ScheduledTaskManager
+	if cfg.SchedulerClient != nil {
+		scheduledManager = NewScheduledTaskManager(cfg.SchedulerClient, cfg.SchedulerGroupName)
+	}
 
 	return &ResourceBuilder{
 		ecsClient:          cfg.ECSClient,
-		schedulerClient:    cfg.SchedulerClient,
+		pruneSchedules:     cfg.PruneSchedules,
 		autoScalingClient:  cfg.AutoScalingClient,
 		elbv2Client:        cfg.ELBV2Client,
 		taskDefManager:     NewTaskDefManager(cfg.ECSClient),
 		serviceManager:     serviceManager,
-		scheduledManager:   NewScheduledTaskManager(cfg.SchedulerClient, cfg.SchedulerGroupName),
+		scheduledManager:   scheduledManager,
 		targetGroupManager: targetGroupManager,
 		listenerRuleMgr:    listenerRuleMgr,
 		sdManager:          sdManager,
@@ -401,7 +406,13 @@ func resolveClusterArn(ctx context.Context, ecsClient *awsclient.ECSClient, clus
 }
 
 func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *config.Manifest, state *DesiredState, roleArn string) error {
-	if b.schedulerClient == nil {
+	if b.scheduledManager == nil {
+		if manifest.ScheduleCleanupPrefix != "" {
+			if b.pruneSchedules {
+				return fmt.Errorf("cannot prune schedules: scheduler client not initialized")
+			}
+			log.Warn("schedule cleanup check failed: scheduler client not initialized; no schedules will be pruned")
+		}
 		if len(manifest.ScheduledTasks) > 0 {
 			log.Warn("scheduler client not initialized, skipping scheduled tasks")
 		}
@@ -442,11 +453,25 @@ func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *con
 			"action", resource.Action)
 	}
 
-	orphans, err := b.scheduledManager.FindOrphans(ctx, manifest.Name, desiredNames, manifest.Tags)
+	orphans, err := b.scheduledManager.FindOrphans(ctx, manifest.ScheduleCleanupPrefix, desiredNames)
 	if err != nil {
-		log.Debug("failed to find orphan schedules", "error", err)
+		if b.pruneSchedules {
+			return err
+		}
+		log.Warn("schedule cleanup check failed; no schedules will be pruned", "error", err)
+		return nil
+	}
+	if len(orphans) > 0 && len(desiredNames) == 0 {
+		if b.pruneSchedules {
+			return fmt.Errorf("refusing to prune %d schedules under %q: no scheduled tasks rendered; review the manifest or remove the final schedules manually", len(orphans), manifest.ScheduleCleanupPrefix)
+		}
+		log.Warn("no scheduled tasks rendered; cleanup requires manual review", "prefix", manifest.ScheduleCleanupPrefix)
 	}
 	for _, orphan := range orphans {
+		if !b.pruneSchedules {
+			log.Warn("orphan schedule (report only; no deletion planned)", "group", b.scheduledManager.GroupName(), "name", orphan.Name)
+			continue
+		}
 		key := fmt.Sprintf("orphan-%s", orphan.Name)
 		state.ScheduledTasks[key] = orphan
 		log.Debug("added orphan schedule for deletion", "name", orphan.Name)

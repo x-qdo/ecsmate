@@ -19,10 +19,11 @@ import (
 )
 
 var (
-	applyAutoApprove bool
-	applyNoWait      bool
-	applyTimeout     time.Duration
-	applyLogLines    int
+	applyAutoApprove    bool
+	applyNoWait         bool
+	applyTimeout        time.Duration
+	applyLogLines       int
+	applyPruneSchedules bool
 )
 
 var applyCmd = &cobra.Command{
@@ -45,6 +46,7 @@ Exit codes:
 
 func init() {
 	applyCmd.Flags().BoolVar(&applyAutoApprove, "auto-approve", false, "Skip interactive approval")
+	applyCmd.Flags().BoolVar(&applyPruneSchedules, "prune-schedules", false, "Delete orphan schedules under scheduleCleanupPrefix")
 	applyCmd.Flags().BoolVar(&applyNoWait, "no-wait", false, "Don't wait for deployments to complete")
 	applyCmd.Flags().DurationVar(&applyTimeout, "timeout", 15*time.Minute, "Timeout for waiting on deployments")
 	applyCmd.Flags().IntVar(&applyLogLines, "log-lines", -1, "Max log lines to show on task failure (-1=all, 0=none)")
@@ -69,6 +71,9 @@ func runApply(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		printManifestError(err, !opts.NoColor)
 		os.Exit(ExitCodeError)
+	}
+	if err := resources.ValidateScheduleCleanup(manifest, applyPruneSchedules); err != nil {
+		return err
 	}
 
 	var managedSecrets *config.ManagedSecrets
@@ -112,6 +117,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		ServiceDiscoveryClient: clients.ServiceDiscovery,
 		CloudWatchClient:       clients.CloudWatch,
 		SchedulerGroupName:     manifest.Name,
+		PruneSchedules:         applyPruneSchedules,
 	})
 	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
 	if err != nil {

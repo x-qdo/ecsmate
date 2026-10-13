@@ -23,6 +23,8 @@ const (
 	ExitCodeImageOnlyChange = 4
 )
 
+var diffPruneSchedules bool
+
 var diffCmd = &cobra.Command{
 	Use:   "diff",
 	Short: "Show diff between desired and current state",
@@ -36,6 +38,10 @@ Exit codes:
   2 - Changes detected (useful for CI)
   4 - Image-only changes detected (useful for fast-path deployments)`,
 	RunE: runDiff,
+}
+
+func init() {
+	diffCmd.Flags().BoolVar(&diffPruneSchedules, "prune-schedules", false, "Plan deletion of orphan schedules under scheduleCleanupPrefix")
 }
 
 func runDiff(cmd *cobra.Command, args []string) error {
@@ -57,6 +63,9 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		printManifestError(err, !opts.NoColor)
 		os.Exit(ExitCodeError)
+	}
+	if err := resources.ValidateScheduleCleanup(manifest, diffPruneSchedules); err != nil {
+		return err
 	}
 
 	var managedSecrets *config.ManagedSecrets
@@ -100,6 +109,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		ServiceDiscoveryClient: clients.ServiceDiscovery,
 		CloudWatchClient:       clients.CloudWatch,
 		SchedulerGroupName:     manifest.Name,
+		PruneSchedules:         diffPruneSchedules,
 	})
 	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
 	if err != nil {
@@ -207,13 +217,14 @@ func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.M
 		return nil, err
 	}
 
-	// Initialize Scheduler client if there are scheduled tasks
-	if len(manifest.ScheduledTasks) > 0 {
+	// Cleanup must also inspect schedules when no tasks are rendered.
+	if len(manifest.ScheduledTasks) > 0 || manifest.ScheduleCleanupPrefix != "" {
 		clients.Scheduler, err = aws.NewSchedulerClient(ctx, opts.Region)
 		if err != nil {
 			log.Warn("failed to initialize scheduler client", "error", err)
 		}
-
+	}
+	if len(manifest.ScheduledTasks) > 0 {
 		// Initialize IAM client for EventBridge role
 		clients.IAM, err = aws.NewIAMClient(ctx, opts.Region)
 		if err != nil {

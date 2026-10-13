@@ -58,6 +58,7 @@ Resources tagged with `ManagedBy=ecsmate` for:
 - TargetGroups: naming pattern `{manifestName}-r{priority}` + tag check
 - ServiceDiscovery: by namespace, tag check
 - ListenerRules: by host/path first; priority fallback only for rules whose target group belongs to the same manifest
+- ScheduledTasks: explicit `scheduleCleanupPrefix` within the manifest's Scheduler group; no per-schedule tags. Report-only unless `--prune-schedules` is passed. Pruning fails on cleanup read errors or an empty rendered schedule set with live candidates.
 
 ## RECREATE TRIGGERS
 
