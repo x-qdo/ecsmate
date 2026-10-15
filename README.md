@@ -177,6 +177,8 @@ Three types:
 - `merged`: override an existing task definition ARN
 - `remote`: use a task definition ARN as-is
 
+Containers can set `stopTimeout` in seconds to allow in-flight work to finish before ECS sends SIGKILL. Fargate requires 2–120 seconds when set; ecsmate rejects values outside that range. Omit it to keep ECS's default; merged task definitions preserve the base container's value.
+
 Managed example:
 ```cue
 taskDefinitions: {

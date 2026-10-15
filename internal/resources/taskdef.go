@@ -123,9 +123,10 @@ func (r *TaskDefResource) ToRegisterInput() (*ecs.RegisterTaskDefinitionInput, e
 
 func convertContainerDefinition(cd config.ContainerDefinition) types.ContainerDefinition {
 	containerDef := types.ContainerDefinition{
-		Name:      aws.String(cd.Name),
-		Image:     aws.String(cd.Image),
-		Essential: aws.Bool(cd.Essential),
+		Name:        aws.String(cd.Name),
+		Image:       aws.String(cd.Image),
+		Essential:   aws.Bool(cd.Essential),
+		StopTimeout: cd.StopTimeout,
 	}
 
 	if cd.CPU > 0 {
@@ -428,13 +429,14 @@ func (m *TaskDefManager) applyOverrides(base *types.TaskDefinition, td *config.T
 
 func convertECSContainerDefinition(cd types.ContainerDefinition) config.ContainerDefinition {
 	result := config.ContainerDefinition{
-		Name:       aws.ToString(cd.Name),
-		Image:      aws.ToString(cd.Image),
-		CPU:        int(cd.Cpu),
-		Memory:     int(aws.ToInt32(cd.Memory)),
-		Essential:  aws.ToBool(cd.Essential),
-		Command:    cd.Command,
-		EntryPoint: cd.EntryPoint,
+		Name:        aws.ToString(cd.Name),
+		Image:       aws.ToString(cd.Image),
+		CPU:         int(cd.Cpu),
+		Memory:      int(aws.ToInt32(cd.Memory)),
+		Essential:   aws.ToBool(cd.Essential),
+		Command:     cd.Command,
+		EntryPoint:  cd.EntryPoint,
+		StopTimeout: cd.StopTimeout,
 	}
 
 	if cd.WorkingDirectory != nil {
