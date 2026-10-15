@@ -339,6 +339,7 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 					command: ["serve", "--port", "8080"]
 					entryPoint: ["/bin/sh", "-c"]
 					workingDirectory: "/app"
+					stopTimeout: 120
 					environment: {
 						ENV: "production"
 						DEBUG: "false"
@@ -417,6 +418,9 @@ func TestParseManifest_ContainerDefinitionFull(t *testing.T) {
 	}
 	if cd.Memory != 256 {
 		t.Errorf("expected memory 256, got %d", cd.Memory)
+	}
+	if cd.StopTimeout == nil || *cd.StopTimeout != 120 {
+		t.Errorf("expected stopTimeout 120, got %v", cd.StopTimeout)
 	}
 	if cd.WorkingDirectory != "/app" {
 		t.Errorf("expected workingDirectory '/app', got '%s'", cd.WorkingDirectory)
@@ -995,5 +999,42 @@ func TestParseManifest_Empty(t *testing.T) {
 	}
 	if len(manifest.ScheduledTasks) != 0 {
 		t.Errorf("expected 0 scheduled tasks, got %d", len(manifest.ScheduledTasks))
+	}
+}
+
+func TestParseTaskDefinition_StopTimeout(t *testing.T) {
+	tests := []struct {
+		name, compatibilities, timeout string
+		wantErr                        bool
+	}{
+		{"Fargate omitted", `["FARGATE"]`, "", false},
+		{"Fargate zero", `["FARGATE"]`, "stopTimeout: 0", true},
+		{"Fargate below minimum", `["FARGATE"]`, "stopTimeout: 1", true},
+		{"Fargate minimum", `["FARGATE"]`, "stopTimeout: 2", false},
+		{"Fargate maximum", `["FARGATE"]`, "stopTimeout: 120", false},
+		{"Fargate above maximum", `["FARGATE"]`, "stopTimeout: 121", true},
+		{"EC2 longer timeout", `["EC2"]`, "stopTimeout: 180", false},
+		{"mixed compatibilities", `["EC2", "FARGATE"]`, "stopTimeout: 180", true},
+	}
+	ctx := cuecontext.New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := ctx.CompileString(`{
+				type: "managed"
+				family: "worker"
+				requiresCompatibilities: ` + tt.compatibilities + `
+				containerDefinitions: [{name: "worker", image: "worker:v1", ` + tt.timeout + `}]
+			}`)
+			if err := value.Err(); err != nil {
+				t.Fatalf("compile test value: %v", err)
+			}
+			_, err := parseTaskDefinition("worker", value)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parse error = %v, want error = %v", err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "stopTimeout") {
+				t.Fatalf("expected stopTimeout validation error, got %v", err)
+			}
+		})
 	}
 }

@@ -591,6 +591,7 @@ type ContainerDefView struct {
 	CPU          int               `json:"cpu,omitempty"`
 	Memory       int               `json:"memory,omitempty"`
 	Essential    bool              `json:"essential"`
+	StopTimeout  *int32            `json:"stopTimeout,omitempty"`
 	Command      []string          `json:"command,omitempty"`
 	Environment  map[string]string `json:"environment,omitempty"`
 	Secrets      map[string]string `json:"secrets,omitempty"`
@@ -626,12 +627,13 @@ func buildTaskDefView(td *resources.TaskDefResource) TaskDefView {
 
 		for _, cd := range td.Desired.ContainerDefinitions {
 			cdView := ContainerDefView{
-				Name:      cd.Name,
-				Image:     cd.Image,
-				CPU:       cd.CPU,
-				Memory:    cd.Memory,
-				Essential: cd.Essential,
-				Command:   cd.Command,
+				Name:        cd.Name,
+				Image:       cd.Image,
+				CPU:         cd.CPU,
+				Memory:      cd.Memory,
+				Essential:   cd.Essential,
+				StopTimeout: cd.StopTimeout,
+				Command:     cd.Command,
 			}
 
 			if len(cd.Environment) > 0 {
@@ -709,6 +711,7 @@ func buildTaskDefCurrentView(td *resources.TaskDefResource) TaskDefView {
 				cdView.Essential = *cd.Essential
 			}
 			cdView.Command = cd.Command
+			cdView.StopTimeout = cd.StopTimeout
 
 			if len(cd.Environment) > 0 {
 				cdView.Environment = make(map[string]string)

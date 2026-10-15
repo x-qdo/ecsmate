@@ -41,6 +41,20 @@ manifest: schema.#Manifest & {
 			wantErr: false,
 		},
 		{
+			name: "valid container stop timeout",
+			cueFile: `package test
+import "github.com/x-qdo/ecsmate/pkg/cue:schema"
+manifest: schema.#Manifest & {
+	name: "test"
+	taskDefinitions: worker: {
+		type: "managed"
+		family: "worker"
+		containerDefinitions: [{name: "worker", image: "worker:v1", stopTimeout: 120}]
+	}
+}`,
+			wantErr: false,
+		},
+		{
 			name: "valid managed secrets KMS key region",
 			cueFile: `package test
 import "github.com/x-qdo/ecsmate/pkg/cue:schema"
