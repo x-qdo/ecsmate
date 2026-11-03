@@ -399,8 +399,6 @@ type ecsTaskOverrideInput struct {
 	ContainerOverrides []ecsContainerOverride `json:"containerOverrides,omitempty"`
 	CPU                string                 `json:"cpu,omitempty"`
 	Memory             string                 `json:"memory,omitempty"`
-	TaskRoleArn        string                 `json:"taskRoleArn,omitempty"`
-	ExecutionRoleArn   string                 `json:"executionRoleArn,omitempty"`
 }
 
 type ecsContainerOverride struct {
@@ -422,16 +420,13 @@ func (r *ScheduledTaskResource) buildOverridesInput() string {
 	}
 
 	overrides := r.Desired.Overrides
-	if overrides.CPU == "" && overrides.Memory == "" && overrides.TaskRoleArn == "" &&
-		overrides.ExecutionRoleArn == "" && len(overrides.ContainerOverrides) == 0 {
+	if overrides.CPU == "" && overrides.Memory == "" && len(overrides.ContainerOverrides) == 0 {
 		return ""
 	}
 
 	input := ecsTaskOverrideInput{
-		CPU:              overrides.CPU,
-		Memory:           overrides.Memory,
-		TaskRoleArn:      overrides.TaskRoleArn,
-		ExecutionRoleArn: overrides.ExecutionRoleArn,
+		CPU:    overrides.CPU,
+		Memory: overrides.Memory,
 	}
 
 	for _, co := range overrides.ContainerOverrides {
