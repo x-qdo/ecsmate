@@ -2,9 +2,30 @@ package diff
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/x-qdo/ecsmate/internal/config"
 )
+
+type testSSMResolver struct {
+	params map[string]string
+}
+
+func (r testSSMResolver) GetParameter(ctx context.Context, name string) (string, error) {
+	return r.params[name], nil
+}
+
+func (r testSSMResolver) GetParameters(ctx context.Context, names []string) (map[string]string, error) {
+	result := make(map[string]string)
+	for _, name := range names {
+		if value, ok := r.params[name]; ok {
+			result[name] = value
+		}
+	}
+	return result, nil
+}
 
 func TestRenderer_RenderDiff_NoChanges(t *testing.T) {
 	var buf bytes.Buffer
@@ -74,6 +95,120 @@ func TestRenderer_RenderDiff_WithEntries(t *testing.T) {
 	// Noop entries should not appear in new format
 	if strings.Contains(output, "unchanged-service") {
 		t.Error("noop entries should be filtered out")
+	}
+}
+
+func TestRenderer_RenderDiff_RedactsResolvedSSMValues(t *testing.T) {
+	const plaintext = "PLAINTEXT_DB_PASSWORD_Sup3rSecret_123"
+
+	manifest := &config.Manifest{
+		TaskDefinitions: map[string]config.TaskDefinition{
+			"web": {
+				ContainerDefinitions: []config.ContainerDefinition{
+					{
+						Name:  "web",
+						Image: "repo/app:{{ssm:/prod/image-tag}}",
+						Environment: []config.KeyValuePair{
+							{Name: "DATABASE_PASSWORD", Value: "{{ssm:/prod/db/password}}"},
+						},
+						Secrets: []config.Secret{
+							{Name: "DB_PASSWORD", ValueFrom: "{{ssm:/prod/db/password}}"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := config.ResolveSSMReferences(context.Background(), manifest, testSSMResolver{
+		params: map[string]string{
+			"/prod/db/password": plaintext,
+			"/prod/image-tag":   "secret-image-tag",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveSSMReferences failed: %v", err)
+	}
+
+	td := manifest.TaskDefinitions["web"]
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+	renderer.RenderDiff([]DiffEntry{
+		{
+			Type:     DiffTypeCreate,
+			Name:     "web",
+			Resource: "TaskDefinition",
+			Desired: map[string]interface{}{
+				"containerDefinitions": []interface{}{
+					map[string]interface{}{
+						"name":        td.ContainerDefinitions[0].Name,
+						"image":       td.ContainerDefinitions[0].Image,
+						"environment": map[string]interface{}{"DATABASE_PASSWORD": td.ContainerDefinitions[0].Environment[0].Value},
+						"secrets":     map[string]interface{}{"DB_PASSWORD": td.ContainerDefinitions[0].Secrets[0].ValueFrom},
+					},
+				},
+			},
+		},
+	})
+
+	output := buf.String()
+	if strings.Contains(output, plaintext) {
+		t.Fatalf("diff output contains plaintext SSM value: %s", output)
+	}
+	if strings.Contains(output, "secret-image-tag") {
+		t.Fatalf("diff output contains SSM-resolved image value: %s", output)
+	}
+	if !strings.Contains(output, "[redacted:ssm]") {
+		t.Fatalf("diff output should include redaction marker, got: %s", output)
+	}
+}
+
+func TestRenderer_RenderDiff_RedactsSplitSSMValues(t *testing.T) {
+	const (
+		firstValue  = "SENSITIVE_SUBNET_VALUE_A"
+		secondValue = "SENSITIVE_SUBNET_VALUE_B"
+	)
+
+	manifest := &config.Manifest{
+		Services: map[string]config.Service{
+			"web": {
+				NetworkConfiguration: &config.NetworkConfiguration{
+					Subnets: []string{"{{ssm:/prod/subnets}}"},
+				},
+			},
+		},
+	}
+
+	err := config.ResolveSSMReferences(context.Background(), manifest, testSSMResolver{
+		params: map[string]string{
+			"/prod/subnets": firstValue + ", " + secondValue,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveSSMReferences failed: %v", err)
+	}
+
+	service := manifest.Services["web"]
+	var buf bytes.Buffer
+	renderer := NewRenderer(&buf, true)
+	renderer.RenderDiff([]DiffEntry{{
+		Type:     DiffTypeCreate,
+		Name:     "web",
+		Resource: "Service",
+		Desired: map[string]interface{}{
+			"subnets": []interface{}{
+				service.NetworkConfiguration.Subnets[0],
+				service.NetworkConfiguration.Subnets[1],
+			},
+		},
+	}})
+
+	output := buf.String()
+	if strings.Contains(output, firstValue) || strings.Contains(output, secondValue) {
+		t.Fatalf("diff output contains a split SSM value: %s", output)
+	}
+	if !strings.Contains(output, "[redacted:ssm]") {
+		t.Fatalf("diff output should include redaction marker, got: %s", output)
 	}
 }
 

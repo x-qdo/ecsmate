@@ -2,6 +2,8 @@ package config
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -67,6 +69,27 @@ func TestExtractSSMReferences(t *testing.T) {
 			if r != tt.expected[i] {
 				t.Errorf("ExtractSSMReferences(%q)[%d] = %q, expected %q", tt.input, i, r, tt.expected[i])
 			}
+		}
+	}
+}
+
+func TestRedactResolvedSSMValue_RedactsOverlappingValues(t *testing.T) {
+	resolvedSSMValues = sync.Map{}
+	t.Cleanup(func() {
+		resolvedSSMValues = sync.Map{}
+	})
+
+	values := make(map[string]string)
+	for length := 1; length <= 64; length++ {
+		value := strings.Repeat("x", length)
+		values[value] = value
+	}
+	registerResolvedSSMValues(values)
+
+	plaintext := strings.Repeat("x", 64)
+	for attempt := 0; attempt < 16; attempt++ {
+		if got := RedactResolvedSSMValue(plaintext); got != ssmRedactedValue {
+			t.Fatalf("overlapping SSM values were only partially redacted: %q", got)
 		}
 	}
 }

@@ -4,12 +4,18 @@ import (
 	"context"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/x-qdo/ecsmate/internal/log"
 )
 
 var ssmRefPattern = regexp.MustCompile(`\{\{ssm:([^}]+)\}\}`)
+
+const ssmRedactedValue = "[redacted:ssm]"
+
+var resolvedSSMValues sync.Map
 
 // SSMResolver resolves SSM parameter references in strings
 type SSMResolver interface {
@@ -37,11 +43,54 @@ func ResolveSSMReferences(ctx context.Context, manifest *Manifest, resolver SSMR
 	if err != nil {
 		return err
 	}
+	registerResolvedSSMValues(values)
 
 	// Replace references with values
 	replaceSSMReferences(manifest, values)
 
 	return nil
+}
+
+func registerResolvedSSMValues(values map[string]string) {
+	for _, value := range values {
+		registerResolvedSSMValue(value)
+		for _, part := range strings.Split(value, ",") {
+			registerResolvedSSMValue(strings.TrimSpace(part))
+		}
+	}
+}
+
+func registerResolvedSSMValue(value string) {
+	if value != "" {
+		resolvedSSMValues.Store(value, struct{}{})
+	}
+}
+
+// RedactResolvedSSMValue redacts strings that contain values previously returned
+// by ResolveSSMReferences. This keeps decrypted SSM parameters out of diff/apply
+// output while preserving the resolved manifest used for AWS API calls.
+func RedactResolvedSSMValue(s string) string {
+	values := make([]string, 0)
+	resolvedSSMValues.Range(func(key, _ interface{}) bool {
+		value, ok := key.(string)
+		if ok && value != "" {
+			values = append(values, value)
+		}
+		return true
+	})
+
+	sort.Slice(values, func(i, j int) bool {
+		if len(values[i]) != len(values[j]) {
+			return len(values[i]) > len(values[j])
+		}
+		return values[i] < values[j]
+	})
+
+	redacted := s
+	for _, value := range values {
+		redacted = strings.ReplaceAll(redacted, value, ssmRedactedValue)
+	}
+	return redacted
 }
 
 // collectSSMReferences finds all SSM references in a manifest
