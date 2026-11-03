@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -95,6 +96,12 @@ func runApply(cmd *cobra.Command, args []string) error {
 		os.Exit(ExitCodeError)
 	}
 
+	ingress, err := resources.DiscoverIngress(ctx, clients.ELBV2, manifest)
+	if err != nil {
+		log.Error("unsafe ingress configuration", "error", err)
+		os.Exit(ExitCodeError)
+	}
+
 	// Get or create EventBridge scheduler role if needed
 	var schedulerRoleArn string
 	if clients.IAM != nil && len(manifest.ScheduledTasks) > 0 {
@@ -113,7 +120,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		CloudWatchClient:       clients.CloudWatch,
 		SchedulerGroupName:     manifest.Name,
 	})
-	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
+	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn, ingress)
 	if err != nil {
 		log.Error("failed to build desired state", "error", err)
 		os.Exit(ExitCodeError)
@@ -203,6 +210,10 @@ func runApply(cmd *cobra.Command, args []string) error {
 
 	if err := executor.Execute(ctx, execPlan, cluster); err != nil {
 		log.Error("deployment failed", "error", err)
+		var ingressError *resources.IngressError
+		if errors.As(err, &ingressError) {
+			os.Exit(ExitCodeError)
+		}
 		os.Exit(ExitCodeRolloutFailed)
 	}
 

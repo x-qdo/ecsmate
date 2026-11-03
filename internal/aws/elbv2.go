@@ -13,6 +13,14 @@ import (
 	"github.com/x-qdo/ecsmate/internal/log"
 )
 
+func elbv2Tags(values map[string]string) []types.Tag {
+	tags := make([]types.Tag, 0, len(values))
+	for key, value := range values {
+		tags = append(tags, types.Tag{Key: aws.String(key), Value: aws.String(value)})
+	}
+	return tags
+}
+
 type ELBV2Client struct {
 	client *elasticloadbalancingv2.Client
 }
@@ -47,7 +55,6 @@ type CreateTargetGroupInput struct {
 	Timeout             int
 	Interval            int
 	Matcher             string
-	DeregistrationDelay int
 	Tags                map[string]string
 }
 
@@ -72,6 +79,7 @@ func (c *ELBV2Client) CreateTargetGroup(ctx context.Context, input *CreateTarget
 		Port:       aws.Int32(int32(input.Port)),
 		VpcId:      aws.String(input.VpcID),
 		TargetType: types.TargetTypeEnum(input.TargetType),
+		Tags:       elbv2Tags(input.Tags),
 	}
 
 	if input.HealthCheckPath != "" {
@@ -111,40 +119,6 @@ func (c *ELBV2Client) CreateTargetGroup(ctx context.Context, input *CreateTarget
 	}
 
 	tg := &out.TargetGroups[0]
-
-	// Set deregistration delay if specified
-	if input.DeregistrationDelay > 0 {
-		_, err := c.client.ModifyTargetGroupAttributes(ctx, &elasticloadbalancingv2.ModifyTargetGroupAttributesInput{
-			TargetGroupArn: tg.TargetGroupArn,
-			Attributes: []types.TargetGroupAttribute{
-				{
-					Key:   aws.String("deregistration_delay.timeout_seconds"),
-					Value: aws.String(fmt.Sprintf("%d", input.DeregistrationDelay)),
-				},
-			},
-		})
-		if err != nil {
-			log.Warn("failed to set deregistration delay", "error", err)
-		}
-	}
-
-	// Add tags
-	if len(input.Tags) > 0 {
-		tags := make([]types.Tag, 0, len(input.Tags))
-		for k, v := range input.Tags {
-			tags = append(tags, types.Tag{
-				Key:   aws.String(k),
-				Value: aws.String(v),
-			})
-		}
-		_, err := c.client.AddTags(ctx, &elasticloadbalancingv2.AddTagsInput{
-			ResourceArns: []string{aws.ToString(tg.TargetGroupArn)},
-			Tags:         tags,
-		})
-		if err != nil {
-			log.Warn("failed to add tags to target group", "error", err)
-		}
-	}
 
 	log.Info("created target group", "name", input.Name, "arn", aws.ToString(tg.TargetGroupArn))
 	return tg, nil
@@ -247,8 +221,12 @@ func (c *ELBV2Client) ModifyTargetGroup(ctx context.Context, arn string, input *
 		}
 	}
 
-	if _, err := c.client.ModifyTargetGroup(ctx, modifyInput); err != nil {
-		return fmt.Errorf("failed to modify target group %s: %w", arn, err)
+	if modifyInput.HealthCheckPath != nil || modifyInput.HealthCheckProtocol != "" || modifyInput.HealthCheckPort != nil ||
+		modifyInput.HealthyThresholdCount != nil || modifyInput.UnhealthyThresholdCount != nil ||
+		modifyInput.HealthCheckTimeoutSeconds != nil || modifyInput.HealthCheckIntervalSeconds != nil || modifyInput.Matcher != nil {
+		if _, err := c.client.ModifyTargetGroup(ctx, modifyInput); err != nil {
+			return fmt.Errorf("failed to modify target group %s: %w", arn, err)
+		}
 	}
 
 	if input.DeregistrationDelay > 0 {
@@ -274,6 +252,7 @@ type CreateListenerRuleInput struct {
 	Priority    int
 	Conditions  []RuleConditionInput
 	Actions     []RuleActionInput
+	Tags        map[string]string
 }
 
 type RuleConditionInput struct {
@@ -390,6 +369,7 @@ func (c *ELBV2Client) CreateListenerRule(ctx context.Context, input *CreateListe
 
 	out, err := c.client.CreateRule(ctx, &elasticloadbalancingv2.CreateRuleInput{
 		ListenerArn: aws.String(input.ListenerArn),
+		Tags:        elbv2Tags(input.Tags),
 		Priority:    aws.Int32(int32(input.Priority)),
 		Conditions:  conditions,
 		Actions:     actions,

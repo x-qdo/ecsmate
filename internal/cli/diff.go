@@ -83,6 +83,12 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		os.Exit(ExitCodeError)
 	}
 
+	ingress, err := resources.DiscoverIngress(ctx, clients.ELBV2, manifest)
+	if err != nil {
+		log.Error("unsafe ingress configuration", "error", err)
+		os.Exit(ExitCodeError)
+	}
+
 	// Get EventBridge scheduler role ARN if needed
 	var schedulerRoleArn string
 	if clients.IAM != nil && len(manifest.ScheduledTasks) > 0 {
@@ -101,7 +107,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		CloudWatchClient:       clients.CloudWatch,
 		SchedulerGroupName:     manifest.Name,
 	})
-	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn)
+	state, err := builder.BuildDesiredState(ctx, manifest, schedulerRoleArn, ingress)
 	if err != nil {
 		log.Error("failed to build desired state", "error", err)
 		os.Exit(ExitCodeError)
@@ -236,7 +242,7 @@ func initAWSClients(ctx context.Context, opts *GlobalOptions, manifest *config.M
 	if manifest.Ingress != nil {
 		clients.ELBV2, err = aws.NewELBV2Client(ctx, opts.Region)
 		if err != nil {
-			log.Warn("failed to initialize ELBV2 client", "error", err)
+			return nil, fmt.Errorf("failed to initialize ELBV2 client: %w", err)
 		}
 	}
 

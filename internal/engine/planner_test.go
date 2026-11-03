@@ -350,7 +350,7 @@ func TestBuildServiceView(t *testing.T) {
 		},
 	}
 
-	view := buildServiceView(svc, nil, nil, nil, "")
+	view := buildServiceView(svc, nil, nil, nil)
 
 	if view.Cluster != "production-cluster" {
 		t.Errorf("expected cluster 'production-cluster', got '%s'", view.Cluster)
@@ -401,7 +401,7 @@ func TestBuildServiceView_SortsNetworkConfig(t *testing.T) {
 		},
 	}
 
-	view := buildServiceView(svc, nil, nil, nil, "")
+	view := buildServiceView(svc, nil, nil, nil)
 
 	if view.NetworkConfiguration == nil {
 		t.Fatal("expected network configuration, got nil")
@@ -485,7 +485,7 @@ func TestBuildServiceView_IngressPlaceholder(t *testing.T) {
 		},
 	}
 
-	view := buildServiceView(svc, ingress, nil, nil, "")
+	view := buildServiceView(svc, ingress, nil, nil)
 
 	if len(view.LoadBalancers) != 1 {
 		t.Fatalf("expected 1 load balancer, got %d", len(view.LoadBalancers))
@@ -526,7 +526,7 @@ func TestBuildServiceView_IngressPlaceholder_UsesExistingTargetGroup(t *testing.
 		},
 	}
 
-	view := buildServiceView(svc, ingress, nil, targetGroups, "cal")
+	view := buildServiceView(svc, ingress, nil, targetGroups)
 
 	if len(view.LoadBalancers) != 1 {
 		t.Fatalf("expected 1 load balancer, got %d", len(view.LoadBalancers))
@@ -558,7 +558,7 @@ func TestBuildServiceView_TaskDefinitionPlaceholder(t *testing.T) {
 		},
 	}
 
-	view := buildServiceView(svc, nil, taskDefs, nil, "")
+	view := buildServiceView(svc, nil, taskDefs, nil)
 
 	expected := "arn:aws:ecs:eu-west-1:570129572534:task-definition/cal-web:(new revision after apply)"
 	if view.TaskDefinition != expected {
@@ -1107,7 +1107,7 @@ func TestResolveTargetGroupArnForView_ExistingNoop(t *testing.T) {
 		},
 	}
 
-	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+	arn := resolveTargetGroupArnForView(targetGroups, 0)
 
 	if arn != "arn:aws:elasticloadbalancing:eu-west-1:123456789:targetgroup/cal-r101/abc123" {
 		t.Errorf("expected existing ARN, got %q", arn)
@@ -1124,7 +1124,7 @@ func TestResolveTargetGroupArnForView_CreateAction(t *testing.T) {
 		},
 	}
 
-	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+	arn := resolveTargetGroupArnForView(targetGroups, 0)
 
 	if arn != pendingTargetGroupArn {
 		t.Errorf("expected placeholder for CREATE action, got %q", arn)
@@ -1141,7 +1141,7 @@ func TestResolveTargetGroupArnForView_RecreateAction(t *testing.T) {
 		},
 	}
 
-	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+	arn := resolveTargetGroupArnForView(targetGroups, 0)
 
 	if arn != pendingTargetGroupArn {
 		t.Errorf("expected placeholder for RECREATE action, got %q", arn)
@@ -1158,7 +1158,7 @@ func TestResolveTargetGroupArnForView_UpdateAction(t *testing.T) {
 		},
 	}
 
-	arn := resolveTargetGroupArnForView(targetGroups, "cal", 101)
+	arn := resolveTargetGroupArnForView(targetGroups, 0)
 
 	if arn != "arn:aws:elasticloadbalancing:eu-west-1:123456789:targetgroup/cal-r101/abc123" {
 		t.Errorf("expected existing ARN for UPDATE action, got %q", arn)

@@ -46,10 +46,10 @@ type TargetGroupResource struct {
 }
 
 type TargetGroupManager struct {
-	client *awsclient.ELBV2Client
+	client awsclient.IngressAPI
 }
 
-func NewTargetGroupManager(client *awsclient.ELBV2Client) *TargetGroupManager {
+func NewTargetGroupManager(client awsclient.IngressAPI) *TargetGroupManager {
 	return &TargetGroupManager{
 		client: client,
 	}
@@ -69,10 +69,7 @@ func ExtractTargetGroups(manifest *config.Manifest, manifestName string) map[str
 		}
 
 		// Generate unique target group name from rule priority
-		tgName := fmt.Sprintf("%s-r%d", manifestName, rule.Priority)
-		if len(tgName) > 32 {
-			tgName = tgName[:32]
-		}
+		tgName := targetGroupName(manifestName, rule.Priority)
 
 		spec := &TargetGroupSpec{
 			Name:                tgName,
@@ -82,7 +79,7 @@ func ExtractTargetGroups(manifest *config.Manifest, manifestName string) map[str
 			TargetType:          "ip",   // Default for awsvpc network mode
 			HealthCheck:         rule.HealthCheck,
 			DeregistrationDelay: rule.DeregistrationDelay,
-			Tags:                rule.Tags,
+			Tags:                ingressTags(manifest.Tags, rule.Tags),
 		}
 
 		// Store with index as key for later reference
@@ -90,67 +87,6 @@ func ExtractTargetGroups(manifest *config.Manifest, manifestName string) map[str
 	}
 
 	return targetGroups
-}
-
-func (m *TargetGroupManager) BuildResource(ctx context.Context, ruleKey string, spec *TargetGroupSpec, vpcID string) (*TargetGroupResource, error) {
-	resource := &TargetGroupResource{
-		Name:         spec.Name,
-		ManifestName: ruleKey,
-		Desired:      spec,
-		VpcID:        vpcID,
-	}
-
-	if err := m.discoverTargetGroup(ctx, resource); err != nil {
-		log.Debug("failed to discover target group", "name", spec.Name, "error", err)
-	}
-
-	resource.determineAction()
-
-	return resource, nil
-}
-
-func (m *TargetGroupManager) BuildResourceWithExisting(ctx context.Context, ruleKey string, spec *TargetGroupSpec, vpcID, existingArn string) (*TargetGroupResource, error) {
-	resource := &TargetGroupResource{
-		Name:         spec.Name,
-		ManifestName: ruleKey,
-		Desired:      spec,
-		VpcID:        vpcID,
-		Arn:          existingArn,
-	}
-
-	if err := m.discoverTargetGroup(ctx, resource); err != nil {
-		log.Debug("failed to discover target group", "name", spec.Name, "error", err)
-	}
-
-	resource.determineAction()
-
-	return resource, nil
-}
-
-func (m *TargetGroupManager) discoverTargetGroup(ctx context.Context, resource *TargetGroupResource) error {
-	log.Debug("discovering target group", "name", resource.Name)
-
-	if resource.Arn != "" {
-		tg, err := m.client.DescribeTargetGroupByArn(ctx, resource.Arn)
-		if err != nil {
-			return err
-		}
-		if tg != nil {
-			resource.Current = tg
-			return nil
-		}
-	}
-
-	tg, err := m.client.DescribeTargetGroup(ctx, resource.Name)
-	if err != nil {
-		return err
-	}
-
-	resource.Current = tg
-	if tg != nil {
-		resource.Arn = aws.ToString(tg.TargetGroupArn)
-	}
-	return nil
 }
 
 func (resource *TargetGroupResource) determineAction() {
@@ -286,16 +222,26 @@ func (m *TargetGroupManager) Create(ctx context.Context, resource *TargetGroupRe
 		input.Matcher = hc.Matcher
 	}
 
-	if resource.Desired.DeregistrationDelay > 0 {
-		input.DeregistrationDelay = resource.Desired.DeregistrationDelay
-	}
-
 	tg, err := m.client.CreateTargetGroup(ctx, input)
 	if err != nil {
 		return err
 	}
 
-	resource.Arn = aws.ToString(tg.TargetGroupArn)
+	if tg == nil || aws.ToString(tg.TargetGroupArn) == "" {
+		return &IngressError{fmt.Errorf("create returned no target group for %s", resource.Name)}
+	}
+	arn := aws.ToString(tg.TargetGroupArn)
+	tags, err := m.client.DescribeTags(ctx, []string{arn})
+	if err != nil {
+		return &IngressError{fmt.Errorf("cannot verify created target group %s: %w", arn, err)}
+	}
+	if aws.ToString(tg.TargetGroupName) != resource.Name || !matchesManifestTags(tags[arn], resource.Desired.Tags) {
+		return &IngressError{fmt.Errorf("create returned target group %s with unexpected ownership tags %v; expected %v", arn, tags[arn], resource.Desired.Tags)}
+	}
+	resource.Arn = arn
+	if resource.Desired.DeregistrationDelay > 0 {
+		return m.client.ModifyTargetGroup(ctx, arn, &awsclient.ModifyTargetGroupInput{DeregistrationDelay: resource.Desired.DeregistrationDelay})
+	}
 	return nil
 }
 

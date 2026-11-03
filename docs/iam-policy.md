@@ -63,17 +63,17 @@ Required for all ecsmate operations (`diff`, `apply`, `status`, `rollback`):
       "Sid": "ELBv2",
       "Effect": "Allow",
       "Action": [
-        "elasticloadbalancingv2:CreateTargetGroup",
-        "elasticloadbalancingv2:DescribeTargetGroups",
-        "elasticloadbalancingv2:DeleteTargetGroup",
-        "elasticloadbalancingv2:ModifyTargetGroup",
-        "elasticloadbalancingv2:ModifyTargetGroupAttributes",
-        "elasticloadbalancingv2:AddTags",
-        "elasticloadbalancingv2:DescribeTags",
-        "elasticloadbalancingv2:CreateRule",
-        "elasticloadbalancingv2:DescribeRules",
-        "elasticloadbalancingv2:DeleteRule",
-        "elasticloadbalancingv2:ModifyRule"
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DeleteTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:DescribeTags",
+        "elasticloadbalancing:CreateRule",
+        "elasticloadbalancing:DescribeRules",
+        "elasticloadbalancing:DeleteRule",
+        "elasticloadbalancing:ModifyRule"
       ],
       "Resource": "*"
     },
@@ -216,9 +216,9 @@ For `diff`, `status`, and `validate` commands only:
       "Sid": "ELBv2Read",
       "Effect": "Allow",
       "Action": [
-        "elasticloadbalancingv2:DescribeTargetGroups",
-        "elasticloadbalancingv2:DescribeTags",
-        "elasticloadbalancingv2:DescribeRules"
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTags",
+        "elasticloadbalancing:DescribeRules"
       ],
       "Resource": "*"
     },
@@ -352,17 +352,17 @@ Replace placeholders with actual values:
       "Sid": "ELBv2",
       "Effect": "Allow",
       "Action": [
-        "elasticloadbalancingv2:CreateTargetGroup",
-        "elasticloadbalancingv2:DescribeTargetGroups",
-        "elasticloadbalancingv2:DeleteTargetGroup",
-        "elasticloadbalancingv2:ModifyTargetGroup",
-        "elasticloadbalancingv2:ModifyTargetGroupAttributes",
-        "elasticloadbalancingv2:AddTags",
-        "elasticloadbalancingv2:DescribeTags",
-        "elasticloadbalancingv2:CreateRule",
-        "elasticloadbalancingv2:DescribeRules",
-        "elasticloadbalancingv2:DeleteRule",
-        "elasticloadbalancingv2:ModifyRule"
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DeleteTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:DescribeTags",
+        "elasticloadbalancing:CreateRule",
+        "elasticloadbalancing:DescribeRules",
+        "elasticloadbalancing:DeleteRule",
+        "elasticloadbalancing:ModifyRule"
       ],
       "Resource": "*"
     },
@@ -485,6 +485,7 @@ Replace placeholders with actual values:
 
 ## Notes
 
+- Ingress requires `elasticloadbalancing:DescribeTags` for ownership checks and `elasticloadbalancing:AddTags` when creating both target groups and listener rules. Missing tag permissions fail the operation; ECSMate does not fall back to creating untagged resources.
 - `ecs:RegisterTaskDefinition` cannot be resource-scoped (AWS limitation)
 - `application-autoscaling` permissions cannot be resource-scoped (AWS limitation)
 - `iam:PassRole` is required for ECS task execution roles and EventBridge Scheduler

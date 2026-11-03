@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	awsclient "github.com/x-qdo/ecsmate/internal/aws"
 	"github.com/x-qdo/ecsmate/internal/config"
@@ -32,17 +31,15 @@ type DesiredState struct {
 }
 
 type ResourceBuilder struct {
-	ecsClient          *awsclient.ECSClient
-	schedulerClient    *awsclient.SchedulerClient
-	autoScalingClient  *awsclient.AutoScalingClient
-	elbv2Client        *awsclient.ELBV2Client
-	taskDefManager     *TaskDefManager
-	serviceManager     *ServiceManager
-	scheduledManager   *ScheduledTaskManager
-	targetGroupManager *TargetGroupManager
-	listenerRuleMgr    *ListenerRuleManager
-	sdManager          *ServiceDiscoveryManager
-	logGroupManager    *LogGroupManager
+	ecsClient         *awsclient.ECSClient
+	schedulerClient   *awsclient.SchedulerClient
+	autoScalingClient *awsclient.AutoScalingClient
+	elbv2Client       *awsclient.ELBV2Client
+	taskDefManager    *TaskDefManager
+	serviceManager    *ServiceManager
+	scheduledManager  *ScheduledTaskManager
+	sdManager         *ServiceDiscoveryManager
+	logGroupManager   *LogGroupManager
 }
 
 type ResourceBuilderConfig struct {
@@ -63,13 +60,6 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 		serviceManager = NewServiceManager(cfg.ECSClient)
 	}
 
-	var targetGroupManager *TargetGroupManager
-	var listenerRuleMgr *ListenerRuleManager
-	if cfg.ELBV2Client != nil {
-		targetGroupManager = NewTargetGroupManager(cfg.ELBV2Client)
-		listenerRuleMgr = NewListenerRuleManager(cfg.ELBV2Client)
-	}
-
 	var sdManager *ServiceDiscoveryManager
 	if cfg.ServiceDiscoveryClient != nil {
 		sdManager = NewServiceDiscoveryManager(cfg.ServiceDiscoveryClient)
@@ -81,22 +71,20 @@ func NewResourceBuilderWithConfig(cfg ResourceBuilderConfig) *ResourceBuilder {
 	}
 
 	return &ResourceBuilder{
-		ecsClient:          cfg.ECSClient,
-		schedulerClient:    cfg.SchedulerClient,
-		autoScalingClient:  cfg.AutoScalingClient,
-		elbv2Client:        cfg.ELBV2Client,
-		taskDefManager:     NewTaskDefManager(cfg.ECSClient),
-		serviceManager:     serviceManager,
-		scheduledManager:   NewScheduledTaskManager(cfg.SchedulerClient, cfg.SchedulerGroupName),
-		targetGroupManager: targetGroupManager,
-		listenerRuleMgr:    listenerRuleMgr,
-		sdManager:          sdManager,
-		logGroupManager:    logGroupManager,
+		ecsClient:         cfg.ECSClient,
+		schedulerClient:   cfg.SchedulerClient,
+		autoScalingClient: cfg.AutoScalingClient,
+		elbv2Client:       cfg.ELBV2Client,
+		taskDefManager:    NewTaskDefManager(cfg.ECSClient),
+		serviceManager:    serviceManager,
+		scheduledManager:  NewScheduledTaskManager(cfg.SchedulerClient, cfg.SchedulerGroupName),
+		sdManager:         sdManager,
+		logGroupManager:   logGroupManager,
 	}
 }
 
 // BuildDesiredState constructs the desired state from a manifest and discovers current state from AWS
-func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *config.Manifest, schedulerRoleArn string) (*DesiredState, error) {
+func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *config.Manifest, schedulerRoleArn string, ingress *IngressPlan) (*DesiredState, error) {
 	state := &DesiredState{
 		Manifest:         manifest,
 		TaskDefs:         make(map[string]*TaskDefResource),
@@ -106,6 +94,11 @@ func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *confi
 		ListenerRules:    make([]*ListenerRuleResource, 0),
 		ServiceDiscovery: make(map[string]*ServiceDiscoveryResource),
 		LogGroups:        make(map[string]*LogGroupResource),
+	}
+
+	if ingress != nil {
+		state.TargetGroups = ingress.TargetGroups
+		state.ListenerRules = ingress.ListenerRules
 	}
 
 	log.Info("building desired state from manifest", "name", manifest.Name)
@@ -130,8 +123,8 @@ func (b *ResourceBuilder) BuildDesiredState(ctx context.Context, manifest *confi
 		return nil, fmt.Errorf("failed to build scheduled tasks: %w", err)
 	}
 
-	if err := b.buildIngress(ctx, manifest, state); err != nil {
-		return nil, fmt.Errorf("failed to build ingress: %w", err)
+	if err := ValidateIngressServices(ctx, b.elbv2Client, manifest, state.Services); err != nil {
+		return nil, err
 	}
 
 	return state, nil
@@ -451,139 +444,6 @@ func (b *ResourceBuilder) buildScheduledTasks(ctx context.Context, manifest *con
 		state.ScheduledTasks[key] = orphan
 		log.Debug("added orphan schedule for deletion", "name", orphan.Name)
 	}
-
-	return nil
-}
-
-func (b *ResourceBuilder) buildIngress(ctx context.Context, manifest *config.Manifest, state *DesiredState) error {
-	if manifest.Ingress == nil {
-		return nil
-	}
-
-	if b.targetGroupManager == nil || b.listenerRuleMgr == nil {
-		log.Warn("ELBV2 client not initialized, skipping ingress resources")
-		return nil
-	}
-
-	vpcID := manifest.Ingress.VpcID
-	listenerArn := manifest.Ingress.ListenerArn
-
-	existingRules := []types.Rule{}
-	if b.listenerRuleMgr != nil {
-		rules, err := b.listenerRuleMgr.DescribeExistingRules(ctx, listenerArn)
-		if err != nil {
-			log.Warn("failed to describe listener rules", "listener", listenerArn, "error", err)
-		} else {
-			existingRules = rules
-		}
-	}
-
-	existingRuleMatches, usedRuleArns := matchExistingListenerRulesWithUsed(manifest.Ingress.Rules, existingRules, manifest.Name)
-	existingTargetGroupArns := make(map[int]string)
-	for idx, rule := range existingRuleMatches {
-		if rule == nil {
-			continue
-		}
-		if arn := extractTargetGroupArn(rule); arn != "" {
-			existingTargetGroupArns[idx] = arn
-		}
-	}
-
-	// Build target groups for rules with service backends
-	tgSpecs := ExtractTargetGroups(manifest, manifest.Name)
-	targetGroupArns := make(map[int]string)
-	usedTargetGroupArns := make(map[string]bool)
-
-	for key, spec := range tgSpecs {
-		log.Debug("building target group resource", "name", spec.Name)
-
-		existingArn := existingTargetGroupArns[spec.RuleIndex]
-		resource, err := b.targetGroupManager.BuildResourceWithExisting(ctx, key, spec, vpcID, existingArn)
-		if err != nil {
-			return fmt.Errorf("failed to build target group %s: %w", spec.Name, err)
-		}
-
-		state.TargetGroups[key] = resource
-
-		if resource.Arn != "" {
-			targetGroupArns[spec.RuleIndex] = resource.Arn
-			usedTargetGroupArns[resource.Arn] = true
-		} else if existingArn != "" {
-			targetGroupArns[spec.RuleIndex] = existingArn
-			usedTargetGroupArns[existingArn] = true
-		}
-	}
-
-	// Collect candidate orphan TG ARNs (rules not in manifest, TGs matching naming pattern)
-	var candidateOrphanTgArns []string
-	for i := range existingRules {
-		rule := &existingRules[i]
-		ruleArn := extractRuleArn(rule)
-		if ruleArn == "" || usedRuleArns[ruleArn] {
-			continue
-		}
-		tgArn := extractTargetGroupArn(rule)
-		if tgArn == "" || usedTargetGroupArns[tgArn] {
-			continue
-		}
-
-		tgName := extractTargetGroupName(tgArn)
-
-		if !isTargetGroupOwnedByManifest(tgName, manifest.Name) {
-			log.Debug("skipping orphan detection for TG not owned by manifest",
-				"tgName", tgName, "manifestName", manifest.Name)
-			continue
-		}
-
-		usedTargetGroupArns[tgArn] = true
-		candidateOrphanTgArns = append(candidateOrphanTgArns, tgArn)
-	}
-
-	// Fetch tags for candidate orphan TGs to verify ownership
-	var orphanTgTags map[string]map[string]string
-	if len(candidateOrphanTgArns) > 0 && b.elbv2Client != nil {
-		tags, err := b.elbv2Client.DescribeTags(ctx, candidateOrphanTgArns)
-		if err != nil {
-			log.Debug("failed to fetch tags for orphan TGs", "error", err)
-		} else {
-			orphanTgTags = tags
-		}
-	}
-
-	// Build DELETE resources for orphaned target groups (verified by tags)
-	for _, tgArn := range candidateOrphanTgArns {
-		tgName := extractTargetGroupName(tgArn)
-
-		if orphanTgTags == nil {
-			log.Debug("skipping orphan TG - could not fetch tags for ownership verification",
-				"tgName", tgName, "tgArn", tgArn)
-			continue
-		}
-		tags := orphanTgTags[tgArn]
-		if !matchesManifestTags(tags, manifest.Tags) {
-			log.Debug("skipping orphan TG - tags do not match manifest",
-				"tgName", tgName, "tgArn", tgArn, "resourceTags", tags, "manifestTags", manifest.Tags)
-			continue
-		}
-
-		orphanKey := fmt.Sprintf("orphan-%s", tgName)
-		resource := &TargetGroupResource{
-			Name:    tgName,
-			Desired: nil,
-			Arn:     tgArn,
-			Action:  TargetGroupActionDelete,
-		}
-		if b.targetGroupManager != nil {
-			if tg, err := b.elbv2Client.DescribeTargetGroupByArn(ctx, tgArn); err == nil && tg != nil {
-				resource.Current = tg
-			}
-		}
-		state.TargetGroups[orphanKey] = resource
-		log.Debug("built orphaned target group for deletion", "name", tgName)
-	}
-
-	// Build listener rules with manifest tags for ownership-based orphan detection
-	state.ListenerRules = b.listenerRuleMgr.BuildResourcesWithExisting(listenerArn, manifest.Ingress.Rules, targetGroupArns, existingRules, manifest.Name, manifest.Tags, orphanTgTags)
 
 	return nil
 }
