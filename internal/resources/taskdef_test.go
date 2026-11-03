@@ -25,10 +25,11 @@ func TestTaskDefResource_ToRegisterInput(t *testing.T) {
 			RequiresCompatibilities: []string{"FARGATE"},
 			ContainerDefinitions: []config.ContainerDefinition{
 				{
-					Name:      "php",
-					Image:     "123456789.dkr.ecr.us-east-1.amazonaws.com/php:latest",
-					CPU:       256,
-					Essential: true,
+					Name:        "php",
+					Image:       "123456789.dkr.ecr.us-east-1.amazonaws.com/php:latest",
+					CPU:         256,
+					StopTimeout: aws.Int32(120),
+					Essential:   true,
 					PortMappings: []config.PortMapping{
 						{ContainerPort: 9000, Protocol: "tcp"},
 					},
@@ -77,6 +78,9 @@ func TestTaskDefResource_ToRegisterInput(t *testing.T) {
 	}
 
 	cd := input.ContainerDefinitions[0]
+	if aws.ToInt32(cd.StopTimeout) != 120 {
+		t.Errorf("expected stopTimeout 120, got %v", cd.StopTimeout)
+	}
 
 	if aws.ToString(cd.Name) != "php" {
 		t.Errorf("expected container name 'php', got '%s'", aws.ToString(cd.Name))
@@ -602,6 +606,7 @@ func TestConvertECSContainerDefinition(t *testing.T) {
 		Essential:        aws.Bool(true),
 		Command:          []string{"php-fpm"},
 		WorkingDirectory: aws.String("/app"),
+		StopTimeout:      aws.Int32(120),
 		Environment: []types.KeyValuePair{
 			{Name: aws.String("APP_ENV"), Value: aws.String("production")},
 		},
@@ -654,6 +659,9 @@ func TestConvertECSContainerDefinition(t *testing.T) {
 	}
 	if !result.Essential {
 		t.Error("expected Essential true")
+	}
+	if aws.ToInt32(result.StopTimeout) != 120 {
+		t.Errorf("expected stopTimeout 120, got %v", result.StopTimeout)
 	}
 	if result.WorkingDirectory != "/app" {
 		t.Errorf("expected WorkingDirectory '/app', got '%s'", result.WorkingDirectory)
@@ -932,5 +940,34 @@ func TestTaskDefResource_IsImageOnlyChangeAllowsECSAssignedHostPort(t *testing.T
 
 	if !resource.IsImageOnlyChange() {
 		t.Error("ECS-assigned hostPort should not disqualify an image-only change")
+	}
+}
+
+func TestContainerStopTimeoutChanges(t *testing.T) {
+	tests := []struct {
+		name             string
+		current, desired *int32
+		wantChange       bool
+	}{
+		{"unset", nil, nil, false},
+		{"unchanged", aws.Int32(120), aws.Int32(120), false},
+		{"added", nil, aws.Int32(120), true},
+		{"changed", aws.Int32(30), aws.Int32(120), true},
+		{"removed", aws.Int32(120), nil, true},
+		{"explicit zero", nil, aws.Int32(0), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current := types.ContainerDefinition{Name: aws.String("worker"), Image: aws.String("worker:v1"), Essential: aws.Bool(true), StopTimeout: tt.current}
+			desired := config.ContainerDefinition{Name: "worker", Image: "worker:v1", Essential: true, StopTimeout: tt.desired}
+			if got := hasContainerChanges(current, desired); got != tt.wantChange {
+				t.Errorf("hasContainerChanges = %v, want %v", got, tt.wantChange)
+			}
+			desired.Image = "worker:v2"
+			imageChanged, otherChanges := compareContainerForImageOnly(current, desired)
+			if !imageChanged || otherChanges != tt.wantChange {
+				t.Errorf("imageChanged = %v, otherChanges = %v; want true, %v", imageChanged, otherChanges, tt.wantChange)
+			}
+		})
 	}
 }

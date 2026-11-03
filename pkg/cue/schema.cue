@@ -74,6 +74,7 @@ import "list"
 	command?: [...string]
 	entryPoint?: [...string]
 	workingDirectory?: string
+	stopTimeout?: int & >=0 & <=2147483647 // seconds; Fargate range (2–120) is checked during manifest parsing
 	healthCheck?: #HealthCheck
 	logConfiguration?: #LogConfiguration
 	dependsOn?: [...#ContainerDependency]

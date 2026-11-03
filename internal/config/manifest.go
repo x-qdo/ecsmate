@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"cuelang.org/go/cue"
@@ -146,6 +147,7 @@ type ContainerDefinition struct {
 	Command          []string
 	EntryPoint       []string
 	WorkingDirectory string
+	StopTimeout      *int32
 	HealthCheck      *HealthCheck
 	LogConfiguration *LogConfiguration
 	DependsOn        []ContainerDependency
@@ -620,6 +622,10 @@ func parseTaskDefinition(name string, v cue.Value) (TaskDefinition, error) {
 				if err != nil {
 					return td, fmt.Errorf("failed to parse container definition: %w", err)
 				}
+				if cd.StopTimeout != nil && slices.Contains(td.RequiresCompatibilities, "FARGATE") &&
+					(*cd.StopTimeout < 2 || *cd.StopTimeout > 120) {
+					return td, fmt.Errorf("container %q: stopTimeout must be between 2 and 120 seconds for FARGATE", cd.Name)
+				}
 				td.ContainerDefinitions = append(td.ContainerDefinitions, cd)
 			}
 		}
@@ -750,6 +756,12 @@ func parseContainerDefinition(v cue.Value) (ContainerDefinition, error) {
 		return cd, fmt.Errorf("essential: %w", err)
 	} else if ok {
 		cd.Essential = essential
+	}
+	if seconds, ok, err := extractOptionalInt(v, "stopTimeout"); err != nil {
+		return cd, fmt.Errorf("stopTimeout: %w", err)
+	} else if ok {
+		timeout := int32(seconds)
+		cd.StopTimeout = &timeout
 	}
 	if wd, ok, err := extractOptionalString(v, "workingDirectory"); err != nil {
 		return cd, fmt.Errorf("workingDirectory: %w", err)

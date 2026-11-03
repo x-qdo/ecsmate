@@ -278,10 +278,11 @@ func TestBuildTaskDefView(t *testing.T) {
 			NetworkMode: "awsvpc",
 			ContainerDefinitions: []config.ContainerDefinition{
 				{
-					Name:      "php",
-					Image:     "123456789.dkr.ecr.us-east-1.amazonaws.com/php:latest",
-					CPU:       256,
-					Essential: true,
+					Name:        "php",
+					Image:       "123456789.dkr.ecr.us-east-1.amazonaws.com/php:latest",
+					CPU:         256,
+					StopTimeout: aws.Int32(120),
+					Essential:   true,
 					Environment: []config.KeyValuePair{
 						{Name: "APP_ENV", Value: "production"},
 					},
@@ -310,6 +311,9 @@ func TestBuildTaskDefView(t *testing.T) {
 
 	if len(view.ContainerDefinitions) > 0 {
 		cd := view.ContainerDefinitions[0]
+		if aws.ToInt32(cd.StopTimeout) != 120 {
+			t.Errorf("expected stopTimeout 120 in diff, got %v", cd.StopTimeout)
+		}
 		if cd.Name != "php" {
 			t.Errorf("expected container name 'php', got '%s'", cd.Name)
 		}
@@ -1366,8 +1370,9 @@ func TestBuildTaskDefCurrentView_WithSecrets(t *testing.T) {
 			Family: aws.String("myapp-api"),
 			ContainerDefinitions: []types.ContainerDefinition{
 				{
-					Name:  aws.String("api"),
-					Image: aws.String("123456789.dkr.ecr.us-east-1.amazonaws.com/api:v1"),
+					Name:        aws.String("api"),
+					Image:       aws.String("123456789.dkr.ecr.us-east-1.amazonaws.com/api:v1"),
+					StopTimeout: aws.Int32(120),
 					Secrets: []types.Secret{
 						{Name: aws.String("DB_PASSWORD"), ValueFrom: aws.String("arn:aws:ssm:us-east-1:123:parameter/myapp/db_password")},
 					},
@@ -1383,6 +1388,9 @@ func TestBuildTaskDefCurrentView_WithSecrets(t *testing.T) {
 	}
 
 	cd := view.ContainerDefinitions[0]
+	if aws.ToInt32(cd.StopTimeout) != 120 {
+		t.Errorf("expected stopTimeout 120 in current diff, got %v", cd.StopTimeout)
+	}
 	if len(cd.Secrets) != 1 {
 		t.Fatalf("expected 1 secret, got %d", len(cd.Secrets))
 	}
