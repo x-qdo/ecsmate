@@ -116,6 +116,9 @@ func validateManifestContent(manifest *config.Manifest) []string {
 	if err := resources.ValidateIngressManifest(manifest); err != nil {
 		errors = append(errors, err.Error())
 	}
+	if err := resources.ValidateScheduleCleanup(manifest, false); err != nil {
+		errors = append(errors, err.Error())
+	}
 
 	// Validate task definitions
 	for name, td := range manifest.TaskDefinitions {

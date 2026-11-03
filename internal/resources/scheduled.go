@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler/types"
 
-	awsclient "github.com/x-qdo/ecsmate/internal/aws"
 	"github.com/x-qdo/ecsmate/internal/config"
 	"github.com/x-qdo/ecsmate/internal/log"
 )
@@ -126,16 +126,6 @@ func (r *ScheduledTaskResource) ToCreateInput(groupName string) (*scheduler.Crea
 	return input, nil
 }
 
-func BuildSchedulerTags(manifestTags map[string]string) []types.Tag {
-	tags := []types.Tag{
-		{Key: aws.String(TagKeyManagedBy), Value: aws.String(TagValueEcsmate)},
-	}
-	for k, v := range manifestTags {
-		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-	return tags
-}
-
 func (r *ScheduledTaskResource) ToUpdateInput(groupName string) (*scheduler.UpdateScheduleInput, error) {
 	if r.Desired == nil {
 		return nil, fmt.Errorf("no desired state for scheduled task %s", r.Name)
@@ -211,8 +201,17 @@ func (r *ScheduledTaskResource) ToUpdateInput(groupName string) (*scheduler.Upda
 	return input, nil
 }
 
+// SchedulerAPI is the subset used for scheduled-task discovery and execution.
+type SchedulerAPI interface {
+	GetSchedule(context.Context, string, string) (*scheduler.GetScheduleOutput, error)
+	ListSchedules(context.Context, string, string) ([]types.ScheduleSummary, error)
+	CreateSchedule(context.Context, *scheduler.CreateScheduleInput) (string, error)
+	UpdateSchedule(context.Context, *scheduler.UpdateScheduleInput) error
+	DeleteSchedule(context.Context, string, string) error
+}
+
 type ScheduledTaskManager struct {
-	schedulerClient *awsclient.SchedulerClient
+	schedulerClient SchedulerAPI
 	groupName       string
 }
 
@@ -220,7 +219,7 @@ func (m *ScheduledTaskManager) GroupName() string {
 	return m.groupName
 }
 
-func NewScheduledTaskManager(schedulerClient *awsclient.SchedulerClient, groupName string) *ScheduledTaskManager {
+func NewScheduledTaskManager(schedulerClient SchedulerAPI, groupName string) *ScheduledTaskManager {
 	if groupName == "" {
 		groupName = "default"
 	}
@@ -463,58 +462,61 @@ func (r *ScheduledTaskResource) buildOverridesInput() string {
 	return string(data)
 }
 
-func (m *ScheduledTaskManager) FindOrphans(ctx context.Context, manifestName string, desiredNames map[string]bool, manifestTags map[string]string) ([]*ScheduledTaskResource, error) {
-	if manifestName == "" {
+// FindOrphans uses the explicitly reserved prefix; AWS supports tags on groups,
+// not individual schedules.
+func (m *ScheduledTaskManager) FindOrphans(ctx context.Context, namePrefix string, desiredNames map[string]bool) ([]*ScheduledTaskResource, error) {
+	if namePrefix == "" {
 		return nil, nil
 	}
 
-	namePrefix := manifestName + "-"
 	schedules, err := m.schedulerClient.ListSchedules(ctx, m.groupName, namePrefix)
 	if err != nil {
-		log.Debug("failed to list schedules for orphan detection", "prefix", namePrefix, "error", err)
-		return nil, nil
+		return nil, fmt.Errorf("failed to check orphan schedules in group %q under prefix %q: %w", m.groupName, namePrefix, err)
 	}
 
 	var orphans []*ScheduledTaskResource
 	for _, sched := range schedules {
 		scheduleName := aws.ToString(sched.Name)
-		if desiredNames[scheduleName] {
+		if !strings.HasPrefix(scheduleName, namePrefix) || desiredNames[scheduleName] {
 			continue
-		}
-
-		schedArn := aws.ToString(sched.Arn)
-		if schedArn == "" {
-			continue
-		}
-
-		tags, err := m.schedulerClient.ListTagsForResource(ctx, schedArn)
-		if err != nil {
-			log.Debug("failed to list schedule tags", "arn", schedArn, "error", err)
-			continue
-		}
-
-		if !matchesManifestTags(tags, manifestTags) {
-			log.Debug("schedule not owned by manifest", "name", scheduleName, "tags", tags)
-			continue
-		}
-
-		current, err := m.schedulerClient.GetSchedule(ctx, scheduleName, m.groupName)
-		if err != nil {
-			log.Debug("failed to get schedule details for orphan", "name", scheduleName, "error", err)
 		}
 
 		orphans = append(orphans, &ScheduledTaskResource{
-			Name:    scheduleName,
-			Desired: nil,
-			Current: current,
-			Action:  ScheduledTaskActionDelete,
-			Arn:     schedArn,
+			Name:   scheduleName,
+			Action: ScheduledTaskActionDelete,
+			Arn:    aws.ToString(sched.Arn),
 		})
 
 		log.Debug("found orphan schedule", "name", scheduleName)
 	}
 
 	return orphans, nil
+}
+
+var schedulePrefixPattern = regexp.MustCompile(`^[0-9A-Za-z_.-]{1,64}$`)
+
+// ValidateScheduleCleanup checks the ownership scope before any AWS operations.
+func ValidateScheduleCleanup(manifest *config.Manifest, prune bool) error {
+	prefix := manifest.ScheduleCleanupPrefix
+	if prefix == "" {
+		if prune {
+			return fmt.Errorf("--prune-schedules requires scheduleCleanupPrefix")
+		}
+		return nil
+	}
+	if !schedulePrefixPattern.MatchString(prefix) {
+		return fmt.Errorf("scheduleCleanupPrefix must be 1-64 characters using only letters, digits, '.', '_' or '-'")
+	}
+	if manifest.Name == "" || !strings.HasPrefix(prefix, manifest.Name+"-") {
+		return fmt.Errorf("scheduleCleanupPrefix %q must start with %q", prefix, manifest.Name+"-")
+	}
+	for name := range manifest.ScheduledTasks {
+		resolved := ResolveScheduledTaskName(manifest.Name, name)
+		if !strings.HasPrefix(resolved, prefix) {
+			return fmt.Errorf("scheduled task %q resolves to %q outside scheduleCleanupPrefix %q", name, resolved, prefix)
+		}
+	}
+	return nil
 }
 
 func ResolveScheduledTaskName(manifestName, taskName string) string {

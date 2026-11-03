@@ -5,6 +5,7 @@ import "list"
 #Manifest: {
 	name: string
 	tags?: [string]: string
+	scheduleCleanupPrefix?: string & =~"^[0-9A-Za-z_.-]{1,64}$"
 
 	secrets?:         #SecretsConfig
 	taskDefinitions?: [string]: #TaskDefinition

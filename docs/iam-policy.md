@@ -103,10 +103,7 @@ Required for all ecsmate operations (`diff`, `apply`, `status`, `rollback`):
         "scheduler:CreateSchedule",
         "scheduler:UpdateSchedule",
         "scheduler:DeleteSchedule",
-        "scheduler:CreateScheduleGroup",
-        "scheduler:ListTagsForResource",
-        "scheduler:TagResource",
-        "scheduler:UntagResource"
+        "scheduler:CreateScheduleGroup"
       ],
       "Resource": "*"
     },
@@ -238,8 +235,7 @@ For `diff`, `status`, and `validate` commands only:
       "Effect": "Allow",
       "Action": [
         "scheduler:GetSchedule",
-        "scheduler:ListSchedules",
-        "scheduler:ListTagsForResource"
+        "scheduler:ListSchedules"
       ],
       "Resource": "*"
     },
@@ -384,18 +380,20 @@ Replace placeholders with actual values:
       "Resource": "arn:aws:logs:REGION:ACCOUNT_ID:log-group:/ecs/*"
     },
     {
+      "Sid": "ListSchedules",
+      "Effect": "Allow",
+      "Action": "scheduler:ListSchedules",
+      "Resource": "*"
+    },
+    {
       "Sid": "EventBridgeScheduler",
       "Effect": "Allow",
       "Action": [
         "scheduler:GetSchedule",
-        "scheduler:ListSchedules",
         "scheduler:CreateSchedule",
         "scheduler:UpdateSchedule",
         "scheduler:DeleteSchedule",
-        "scheduler:CreateScheduleGroup",
-        "scheduler:ListTagsForResource",
-        "scheduler:TagResource",
-        "scheduler:UntagResource"
+        "scheduler:CreateScheduleGroup"
       ],
       "Resource": [
         "arn:aws:scheduler:REGION:ACCOUNT_ID:schedule-group/*",
